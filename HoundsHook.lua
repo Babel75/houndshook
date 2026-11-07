@@ -1,10 +1,18 @@
 --[[
         ================================================================
-          HOUNDSHOOK v5.0 "GOLD"  -  menu WindUI (wbudowane w plik)
+          HOUNDSHOOK v5.1 "GOLD"  -  menu WindUI (wbudowane w plik)
         ================================================================
           Uruchamianie (loadstring - patrz HoundsHook_loader.lua):
 
             loadstring(game:HttpGet("TWOJ_URL/HoundsHook.lua"))()
+
+          Co nowego w v5.1 (HOTFIX pSilent):
+           - FIX: crash 'insert (table expected, got nil)' w hooku
+             __namecall - shared.HoundsHook i API to teraz JEDNA tabela
+             (wczesniej Log ginial przy podmianie shared.HoundsHook = API)
+           - Cala logika pSilent w pcall: kazdy blad predykcji/raycastu
+             przepuszcza oryginalny FireServer zamiast wywalac skrypty gry
+           - logHook samo-naprawiajacy (Log nigdy nie zabije hooka)
 
           Co nowego w v5:
            - Menu w WindUI 1.6.65 (biblioteka WBUDOWANA w plik - zero
@@ -25,7 +33,7 @@
         ================================================================
 ]]
 
-local HH_VERSION = "5.0.0"
+local HH_VERSION = "5.1.0"
 
 ------------------------------------------------------------------
 -- [0] SPRZATANIE PO POPRZEDNIEJ INSTANCJI (hot-reload / zmiana wersji)
@@ -16322,15 +16330,133 @@ local pSilentHooked = false
 local pSilentHookError = "brak"
 local mtHook
 
-shared.HoundsHook = shared.HoundsHook or {}
-shared.HoundsHook.Log = {}
+-- FIX v5.1: shared.HoundsHook wskazuje na API JUZ OD TERAZ (jedna tabela
+-- do konca zycia skryptu). Wczesniej logHook pisal do tymczasowej tabeli
+-- z sekcji [9], a na koncu skryptu robilismy shared.HoundsHook = API
+-- (bez pola Log) -> hook crashowal: "insert (table expected, got nil)",
+-- a blad lecial do skryptow gry (Rojo_AimSampler) i wywalal strzelanie.
+shared.HoundsHook = API
+API.Log = {}
+
+local lastHookWarn = 0
+local function warnHookOnce(info)
+        if os.clock() - lastHookWarn < 2 then
+                return
+        end
+        lastHookWarn = os.clock()
+        warn("[HoundsHook] pSilent hook -> odpuszcza, leci oryginal: " .. info)
+end
 
 local function logHook(name, info)
         print(string.format("[HoundsHook] %s: %s", name, info))
-        table.insert(shared.HoundsHook.Log, 1, { name = name, info = info, t = os.clock() })
-        if #shared.HoundsHook.Log > 4 then
-                table.remove(shared.HoundsHook.Log)
+        -- fail-safe: log NIGDY nie moze zabij hooka (to wywalilo v5)
+        pcall(function()
+                local api = shared.HoundsHook
+                if typeof(api) ~= "table" then
+                        return
+                end
+                if typeof(api.Log) ~= "table" then
+                        api.Log = {}
+                end
+                table.insert(api.Log, 1, { name = name, info = info, t = os.clock() })
+                if #api.Log > 4 then
+                        table.remove(api.Log)
+                end
+        end)
+end
+
+-- Podmienia argumenty Look/AimSample/Fire pod pSilent.
+-- Zwraca true (args podmienione) albo false (przepusc oryginal bez zmian).
+-- Hook wywoluje to w pcall: zadny blad predykcji/raycastu nie przerwie
+-- FireServer ani nie wywali skryptow gry.
+local function patchFireArgs(self, args)
+        local ps = Config.pSilent
+        if not ps or not ps.Enabled then
+                return false
         end
+        local api = shared.HoundsHook
+        local tgt = api and api.pSilentTarget
+        if not tgt then
+                return false
+        end
+
+        local isLook = rawequal(self, LookEvent) and ps.HookLook
+        local isAim = rawequal(self, AimSampleEvent) and ps.HookAimSample
+        local isFire = rawequal(self, FireEvent) and ps.HookFire
+        if not (isLook or isAim or isFire) then
+                return false
+        end
+
+        local camPos = Camera.CFrame.Position
+        local charYaw = api.pSilentCharYaw or 0
+        local tgtChar = tgt.Parent
+
+        -- v5: cel z predykcja balistyczna (lead + spadek grawitacji)
+        local aimPos = predictShotPos(tgt)
+        local rel = aimPos - camPos
+        local dir = rel.Unit
+
+        local worldYaw = math.atan2(-dir.X, -dir.Z)
+        local relYaw = (worldYaw - charYaw + math.pi) % (2 * math.pi) - math.pi
+        local pitch = math.asin(math.clamp(dir.Y, -1, 1))
+
+        if isLook then
+                -- Oryginal: Look:FireServer(relYaw, pitch, dist)
+                if args.n < 4 then
+                        return false
+                end
+                args[2] = relYaw
+                args[3] = pitch
+                args[4] = math.max(2, rel.Magnitude)
+                logHook(
+                        "Look",
+                        string.format(
+                                "Yaw: %.2f, Pitch: %.2f, Dist: %.1f (drop %s)",
+                                relYaw,
+                                pitch,
+                                args[4],
+                                tostring(ps.DropComp)
+                        )
+                )
+                return true
+        elseif isAim then
+                -- Oryginal: AimSample:FireServer(dir, ts)
+                if args.n < 3 then
+                        return false
+                end
+                args[2] = dir
+                local nm = tgtChar and tgtChar.Name or "?"
+                logHook("AimSample", string.format("Cel: %s", nm))
+                return true
+        elseif isFire then
+                -- Oryginal: Fire:FireServer(origin, dir, hitInstance, hitPos, dir2, ts)
+                if args.n < 7 then
+                        return false
+                end
+                local origin = args[2]
+                local dirToAim = (aimPos - origin).Unit
+                args[3] = dirToAim
+
+                -- zgloszone trafienie = promien wzdłuż skompensowanego kierunku
+                local hitInst, hitPos
+                local result = shotRaycast(origin, dirToAim * 3000, nil)
+                if result and result.Instance and tgtChar and result.Instance:IsDescendantOf(tgtChar) then
+                        hitInst = result.Instance
+                        hitPos = result.Position
+                else
+                        -- hedz: serwer i tak liczy z kierunku, zglos cel bezposrednio
+                        hitInst = tgt
+                        hitPos = tgt.Position
+                end
+                args[4] = hitInst
+                args[5] = hitPos
+                args[6] = dirToAim
+
+                logHook("Fire", string.format("Hit -> %s (dropComp=%s)", hitInst.Name, tostring(ps.DropComp)))
+                return true
+        end
+
+        return false
 end
 
 if LookEvent and AimSampleEvent and FireEvent then
@@ -16339,102 +16465,34 @@ if LookEvent and AimSampleEvent and FireEvent then
         elseif not getnamecallmethod then
                 pSilentHookError = "brak getnamecallmethod"
         else
+                local ncWrap = newcclosure or function(f)
+                        return f
+                end
                 local ok, err = pcall(function()
-                        mtHook = hookmetamethod(game, "__namecall", function(...)
-                                local self = ...
+                        mtHook = hookmetamethod(game, "__namecall", ncWrap(function(...)
                                 local method = getnamecallmethod()
 
                                 if method ~= "FireServer" then
                                         return mtHook(...)
                                 end
 
-                                local ps = Config.pSilent
-                                local tgt = shared.HoundsHook and shared.HoundsHook.pSilentTarget
-                                if not ps.Enabled or not tgt then
-                                        return mtHook(...)
-                                end
-
-                                local isLook = rawequal(self, LookEvent) and ps.HookLook
-                                local isAim = rawequal(self, AimSampleEvent) and ps.HookAimSample
-                                local isFire = rawequal(self, FireEvent) and ps.HookFire
-
-                                if not (isLook or isAim or isFire) then
-                                        return mtHook(...)
-                                end
-
-                                local camPos = Camera.CFrame.Position
-                                local charYaw = shared.HoundsHook.pSilentCharYaw or 0
-                                local tgtChar = tgt.Parent
-
-                                -- v5: cel z predykcja balistyczna (lead + spadek grawitacji)
-                                local aimPos = predictShotPos(tgt)
-                                local rel = aimPos - camPos
-                                local dir = rel.Unit
-
-                                local worldYaw = math.atan2(-dir.X, -dir.Z)
-                                local relYaw = (worldYaw - charYaw + math.pi) % (2 * math.pi) - math.pi
-                                local pitch = math.asin(math.clamp(dir.Y, -1, 1))
-
                                 local args = table.pack(...)
+                                -- praca na KOPII argumentow: przy bledzie przepuszczamy
+                                -- czyste oryginalne args, nigdy pol-udane podmienienie
+                                local patch = table.pack(table.unpack(args, 1, args.n))
+                                local okP, patched = pcall(patchFireArgs, patch[1], patch)
 
-                                if isLook then
-                                        -- Oryginal: Look:FireServer(relYaw, pitch, dist)
-                                        if args.n >= 4 then
-                                                args[2] = relYaw
-                                                args[3] = pitch
-                                                args[4] = math.max(2, rel.Magnitude)
-                                                logHook(
-                                                        "Look",
-                                                        string.format(
-                                                                "Yaw: %.2f, Pitch: %.2f, Dist: %.1f (drop %s)",
-                                                                relYaw,
-                                                                pitch,
-                                                                args[4],
-                                                                tostring(ps.DropComp)
-                                                        )
-                                                )
-                                                local Result = table.pack(mtHook(table.unpack(args, 1, args.n)))
-                                                return table.unpack(Result, 1, Result.n)
-                                        end
-                                elseif isAim then
-                                        -- Oryginal: AimSample:FireServer(dir, ts)
-                                        if args.n >= 3 then
-                                                args[2] = dir
-                                                logHook("AimSample", string.format("Cel: %s", tgt.Parent.Name))
-                                                local Result = table.pack(mtHook(table.unpack(args, 1, args.n)))
-                                                return table.unpack(Result, 1, Result.n)
-                                        end
-                                elseif isFire then
-                                        -- Oryginal: Fire:FireServer(origin, dir, hitInstance, hitPos, dir2, ts)
-                                        if args.n >= 7 then
-                                                local origin = args[2]
-                                                local dirToAim = (aimPos - origin).Unit
-                                                args[3] = dirToAim
-
-                                                -- zgloszone trafienie = promien wzdłuż skompensowanego kierunku
-                                                local result = shotRaycast(origin, dirToAim * 3000, nil)
-                                                if result and result.Instance and result.Instance:IsDescendantOf(tgtChar) then
-                                                        args[4] = result.Instance
-                                                        args[5] = result.Position
-                                                else
-                                                        -- hedz: serwer i tak liczy z kierunku, zglos cel bezposrednio
-                                                        args[4] = tgt
-                                                        args[5] = tgt.Position
-                                                end
-                                                args[6] = dirToAim
-
-                                                local partName = args[4] and args[4].Name or "None"
-                                                logHook("Fire", string.format("Hit -> %s (dropComp=%s)", partName, tostring(ps.DropComp)))
-
-                                                local Result = table.pack(mtHook(table.unpack(args, 1, args.n)))
-                                                return table.unpack(Result, 1, Result.n)
-                                        end
+                                if okP and patched then
+                                        local Result = table.pack(mtHook(table.unpack(patch, 1, patch.n)))
+                                        return table.unpack(Result, 1, Result.n)
+                                elseif not okP then
+                                        warnHookOnce(tostring(patched))
                                 end
 
-                                return mtHook(...)
-                        end)
+                                return mtHook(table.unpack(args, 1, args.n))
+                        end))
                         pSilentHooked = true
-                        print("[HoundsHook] pSilent hook installed OK (balistyka v5)")
+                        print("[HoundsHook] pSilent hook installed OK (balistyka v5.1, fail-safe)")
                 end)
                 if not ok then
                         pSilentHookError = tostring(err)
@@ -17650,8 +17708,8 @@ shared.HoundsHook = API
 
 task.defer(function()
         if WindUI then
-                notify("HoundsHook v5 GOLD", "Menu: RIGHT SHIFT / INSERT  •  WindUI 1.6.65 wbudowane w plik", "skull", 7)
+                notify("HoundsHook v5.1 GOLD", "Menu: RIGHT SHIFT / INSERT  •  WindUI 1.6.65 wbudowane w plik", "skull", 7)
         else
-                warn("[HoundsHook] v5 dziala w trybie awaryjnym (bez WindUI). Menu: INSERT / RIGHT SHIFT")
+                warn("[HoundsHook] v5.1 dziala w trybie awaryjnym (bez WindUI). Menu: INSERT / RIGHT SHIFT")
         end
 end)
