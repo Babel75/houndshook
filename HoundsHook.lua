@@ -18040,3 +18040,4 @@ task.defer(function()
                 warn("[HoundsHook] v5.2 dziala w trybie awaryjnym (bez WindUI). Menu: INSERT / RIGHT SHIFT")
         end
 end)
+
