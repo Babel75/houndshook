@@ -1,10 +1,27 @@
 --[[
         ================================================================
-          HOUNDSHOOK v5.2 "GOLD"  -  menu WindUI (wbudowane w plik)
+          HOUNDSHOOK v6.0 "MERGE"  -  menu WindUI (wbudowane w plik)
         ================================================================
           Uruchamianie (loadstring - patrz HoundsHook_loader.lua):
 
-            loadstring(game:HttpGet("Babel75/HoundsHook.lua"))()
+            loadstring(game:HttpGet("TWOJ_URL/HoundsHook.lua"))()
+
+          v6.0 = MERGE: baza v5.2 (menu GOLD, visualsy) + combat z v3:
+           - pSILENT v18: REWRITE Look+AimSample (spojny strumien do
+             serwera), PRE-FIRE SYNC (probki od origin broni tuz przed
+             strzalem), Force Sampler tez bez ADS, Lead + PingComp -
+             niezawodny do 200m (naprawa dystansow 140m+)
+           - NO RELOAD v3: Off / Auto Reload / Full (Top-Up), strzal
+             przerywa reload (UnblockShots), SkipTime, TopUpAt, Cooldown
+           - AIMBUG - spam AimState true/false, hold przy strzale
+           - BUGROLL - spam remota Roll (Ciągły / Start+End)
+           - AUTOSHOOT - sam odpala TryFire (pelna sciezka gry)
+           - SPINBOT - obrot postaci + pitch anti-aim (Up/Down, Sinus)
+           - NOSPREAD - hook AddRecoil / Shake / Kick
+           - CACHE modulow gry (BulletCast/Config) - koniec require co klatke
+           - Z v5.2 zostaje: menu GOLD, ESP 3-kolorowe, off-screen arrows,
+             chinski kapelusz RGB, watermark w prawym gornym rogu,
+             przyjaciele, fail-safe hooki (v5.1)
 
           Co nowego w v5.2:
            - OFF-SCREEN ARROWS - strzalki na krawedzi ekranu wskazuja
@@ -44,7 +61,7 @@
         ================================================================
 ]]
 
-local HH_VERSION = "5.2.0"
+local HH_VERSION = "6.0.0"
 
 ------------------------------------------------------------------
 -- [0] SPRZATANIE PO POPRZEDNIEJ INSTANCJI (hot-reload / zmiana wersji)
@@ -15846,19 +15863,60 @@ local Config = {
                 Enabled = false,
                 Hitbox = "Head",
                 Fov = 200,
-                Prediction = 0, -- ms (dodatkowy lead)
+                Prediction = 0, -- ms (predykcja pozycji przy wyborze punktu)
                 ShowFov = true,
                 ShowTarget = true,
-                HookLook = true,
-                HookAimSample = true,
-                HookFire = true,
-                -- balistyka (dlaczego 140m+ padalo: brak czasu lotu i spadku)
-                BulletSpeed = 1200, -- studs/s - podbij/zmien pod bron
-                DropComp = true, -- kompensacja spadku grawitacyjnego
-                MaxDistance = 250,
+                -- v18: precyzja na dystansie (140-200m)
+                ForceSampler = true, -- wysylaj wlasne Look+AimSample nawet bez ADS
+                UpdateRate = 20, -- ms miedzy wymuszonymi probkami (10-100)
+                RewriteSamples = true, -- podmieniaj AimSample gry na falszywy kierunek
+                RewriteLook = true, -- podmieniaj Look gry na falszywe katy
+                PreFireSync = true, -- Look+AimSample z dokladnym kierunkiem tuz przed Fire
+                Lead = 0, -- ms wyprzedzenia celu (vel * czas)
+                PingComp = false, -- doliczaj ping (GetNetworkPing) do wyprzedzenia
+                -- hooki
+                HookFire = true, -- podmieniaj trafienie w Fire (hit part/pos/dir)
         },
         NoReload = {
                 Enabled = false,
+                Mode = "Auto Reload", -- Off / Auto Reload / Full (Top-Up)
+                UnblockShots = true, -- strzal przerywa reload (nigdy nie czekasz)
+                SkipTime = 0.35, -- s po ktorych reload jest dokanczany natychmiast
+                TopUpAt = 30, -- % magazynka - ponizej tego Top-Up doladowuje
+                Cooldown = 1.5, -- s przerwy miedzy probami Top-Up
+        },
+        AimBug = {
+                Enabled = false,
+                Interval = 50, -- ms miedzy wysylkami (true/false na zmiane)
+        },
+        BugRoll = {
+                Enabled = false,
+                Mode = "Ciągły", -- "Ciągły" = spam Start / "Start+End" = Start, po Interval koniec
+                Interval = 50, -- ms miedzy pakietami (Start+End: czas Start -> End)
+                Pause = 100, -- ms przerwy po End przed kolejnym cyklem (Start+End)
+                EndPacket = "End", -- pakiet konca: "End" / "Cancel"
+        },
+        AutoShoot = {
+                Enabled = false,
+                Fov = 150,
+                Hitbox = "Head",
+                Key = "Always", -- Always / RMB / LMB / Shift / E / Q
+                Delay = 0, -- ms miedzy strzalamy (0 = FireRate broni z Config gry)
+                MaxDist = 0, -- maksymalny dystans do celu w m (0 = bez limitu)
+        },
+        Spinbot = {
+                Enabled = false,
+                Speed = 10, -- obrotow na sekunde
+                Pitch = true, -- anti-aim: postac przechyla sie raz w gore, raz w dol
+                PitchMode = "Up/Down", -- "Up/Down" = twardy flick / "Sinus" = plynnie
+                PitchAngle = 85, -- maks. kat przechylu (stopnie)
+                PitchSpeed = 2, -- tempo: Up/Down = zmiany pozycji na sek, Sinus = Hz
+        },
+        NoSpread = {
+                Enabled = false,
+                Recoil = true, -- blokuj CameraController.AddRecoil (kamera nie ucieka)
+                Shake = true, -- blokuj CameraController.Shake (bez trzesienia)
+                Kick = true, -- blokuj Viewmodel.Kick (bron nie podskakuje)
         },
         Friends = {}, -- [nazwa gracza] = true
         Global = {
@@ -16048,74 +16106,72 @@ local function aimPoint(part, cfg)
 end
 
 ------------------------------------------------------------------
--- [6] pSILENT: PREDYKCJA BALISTYCZNA (czas lotu + grawitacja) DO 200m
+-- [6] CACHE MODULOW GRY (Rojo) - JEDEN RAZ, nie co klatke (v6/v3)
 ------------------------------------------------------------------
-local function predictShotPos(part)
-        local ch = part.Parent
-        local root = ch and (ch:FindFirstChild("HumanoidRootPart") or part)
-        if not root then
-                return part.Position
+local RojoFolder = nil
+local LookEvent, AimSampleEvent, AimStateEvent, RollEvent, FireEvent
+local BulletCast, GameConfig
+local WeaponClientMod, lastViewmodel -- viewmodel cache'owany z hooka TryFire (AutoShoot)
+local ping = 0
+
+do
+        local ok, rojo = pcall(function()
+                return ReplicatedStorage:WaitForChild("Rojo", 10)
+        end)
+        if ok and rojo then
+                RojoFolder = rojo
+                local ok2, remotes = pcall(function()
+                        return rojo:WaitForChild("Remotes", 10)
+                end)
+                if ok2 and remotes then
+                        LookEvent = remotes:FindFirstChild("Look")
+                        AimSampleEvent = remotes:FindFirstChild("AimSample")
+                        AimStateEvent = remotes:FindFirstChild("AimState")
+                        RollEvent = remotes:FindFirstChild("Roll")
+                        FireEvent = remotes:FindFirstChild("Fire")
+                end
         end
-        local ps = Config.pSilent
-        local vel = root.AssemblyLinearVelocity
-        local from = Camera.CFrame.Position
-        local speed = math.max(ps.BulletSpeed or 1200, 50)
-        local base = root.Position + vel * (ps.Prediction / 1000)
-        local t = (base - from).Magnitude / speed
-        local pos = base
-        for _ = 1, 3 do
-                pos = base + vel * t
-                t = (pos - from).Magnitude / speed
-        end
-        pos = base + vel * t
-        if ps.DropComp then
-                local drop = 0.5 * Workspace.Gravity * t * t
-                pos = pos + Vector3.new(0, drop, 0)
-        end
-        return pos
 end
 
--- modul BulletCast z gry: raycast identyczny jak pociski (akcesoria itd.)
-local BulletCast
 task.spawn(function()
-        for _ = 1, 10 do
-                if HHUnloaded then
-                        return
-                end
-                local ok, Rojo = pcall(function()
-                        return ReplicatedStorage:WaitForChild("Rojo", 6)
-                end)
-                if ok and Rojo then
-                        local ok2, mod = pcall(function()
-                                return require(Rojo:WaitForChild("BulletCast", 6))
-                        end)
-                        if ok2 and type(mod) == "table" then
-                                BulletCast = mod
-                                return
-                        end
-                end
-                task.wait(2)
+        if not RojoFolder then
+                return
+        end
+        local ok, mod = pcall(function()
+                return require(RojoFolder:WaitForChild("BulletCast", 10))
+        end)
+        if ok and type(mod) == "table" then
+                BulletCast = mod
+                print("[HoundsHook] BulletCast OK")
         end
 end)
 
-local function shotRaycast(origin, dir, excludeChar)
-        local params = RaycastParams.new()
-        params.FilterType = Enum.RaycastFilterType.Exclude
-        params.FilterDescendantsInstances = { LP.Character, Camera }
-        if excludeChar then
-                table.insert(params.FilterDescendantsInstances, excludeChar)
+task.spawn(function()
+        if not RojoFolder then
+                return
         end
-        local range = dir.Magnitude
-        if BulletCast then
-                local ok, res = pcall(function()
-                        return BulletCast.Raycast(Workspace, origin, dir, params)
-                end)
-                if ok then
-                        return res
+        local ok, cfg = pcall(function()
+                return require(RojoFolder:WaitForChild("Config", 10))
+        end)
+        if ok and type(cfg) == "table" then
+                GameConfig = cfg
+                local w = cfg.Weapon
+                if w then
+                        print(string.format("[HoundsHook] Bron: MaxRange=%.0f, Mag=%.0f, FireRate=%.3f",
+                                w.MaxRange or -1, w.MagazineSize or -1, w.FireRate or -1))
                 end
         end
-        return Workspace:Raycast(origin, dir, params)
-end
+end)
+
+-- ping (kompensacja na dystansie - pSilent v18)
+task.spawn(function()
+        while not HHUnloaded do
+                pcall(function()
+                        ping = LP:GetNetworkPing()
+                end)
+                task.wait(1)
+        end
+end)
 
 ------------------------------------------------------------------
 -- [7] API DLA BRONI (Silent Aim): GetSilentTarget -> Part, Position
@@ -16143,140 +16199,290 @@ function API.GetSilentTarget()
 end
 
 ------------------------------------------------------------------
--- [8] HOOK BRONI: WeaponClient.TryFire (silent aim + No Reload)
---     Wykrywanie DYNAMICZNE (nazwy funkcji, nie numery linii - v4-proof)
+-- [7b] LOG HOOKOW + AIMBUG + BUGROLL (petle remote'ow, z v3)
 ------------------------------------------------------------------
-local HHState = {
-        WC = nil,
-        origTryFire = nil,
-        origReload = nil,
-        weaponInstance = nil,
-        restoredKeys = {}, -- nauczone pola amunicji (diff po strzale)
-        highWater = {}, -- najwyzsze widziane wartosci (pin amunicji)
-        tryFireHooked = false,
-        reloadBlocked = false,
-}
+-- FIX v5.1: shared.HoundsHook i API to JEDNA tabela od teraz do konca
+-- zycia skryptu (Log nigdy nie ginie przy podmianie shared.HoundsHook).
+shared.HoundsHook = API
+API.Log = {}
 
-local AMMO_PATTERNS = { "ammo", "mag", "clip", "bullet", "round", "cartridge", "naboj" }
-
-local function looksLikeAmmoKey(name)
-        local n = string.lower(tostring(name))
-        n = string.gsub(n, "_", "")
-        for _, p in ipairs(AMMO_PATTERNS) do
-                if string.find(n, p, 1, true) then
-                        return true
-                end
-        end
-        return false
-end
-
-local function snapshotAmmo(w)
-        local snap
-        if typeof(w) == "Instance" then
-                snap = {}
-                for _, name in ipairs(w:GetAttributes()) do
-                        local v = w:GetAttribute(name)
-                        if type(v) == "number" then
-                                snap[name] = v
-                        end
-                end
-        elseif type(w) == "table" then
-                snap = {}
-                for k, v in pairs(w) do
-                        if type(v) == "number" then
-                                snap[k] = v
-                        end
-                end
-        end
-        return snap
-end
-
-local function restoreAmmo(w, snap)
-        if not snap then
-                return 0
-        end
-        local restored = 0
-        if typeof(w) == "Instance" then
-                for name, before in pairs(snap) do
-                        local now = w:GetAttribute(name)
-                        if type(now) == "number" and now < before then
-                                w:SetAttribute(name, before)
-                                restored = restored + 1
-                                HHState.restoredKeys[name] = true
-                        end
-                        if type(now) == "number" and now > (HHState.highWater[name] or -1) then
-                                HHState.highWater[name] = now
-                        end
-                end
-        elseif type(w) == "table" then
-                for k, before in pairs(snap) do
-                        local now = w[k]
-                        if type(now) == "number" and now < before then
-                                w[k] = before
-                                restored = restored + 1
-                                HHState.restoredKeys[k] = true
-                        end
-                        if type(now) == "number" and now > (HHState.highWater[k] or -1) then
-                                HHState.highWater[k] = now
-                        end
-                end
-        end
-        return restored
-end
-
-local function wrapWeaponClient(WC)
-        if HHState.tryFireHooked or type(WC) ~= "table" then
+local lastHookWarn = 0
+local function warnHookOnce(info)
+        if os.clock() - lastHookWarn < 2 then
                 return
         end
-        if type(WC.TryFire) ~= "function" then
+        lastHookWarn = os.clock()
+        warn("[HoundsHook] pSilent hook -> odpuszcza, leci oryginal: " .. info)
+end
+
+local function logHook(name, info)
+        print(string.format("[HoundsHook] %s: %s", name, info))
+        -- fail-safe: log NIGDY nie moze zabij hooka (to wywalilo v5)
+        pcall(function()
+                local api = shared.HoundsHook
+                if typeof(api) ~= "table" then
+                        return
+                end
+                if typeof(api.Log) ~= "table" then
+                        api.Log = {}
+                end
+                table.insert(api.Log, 1, { name = name, info = info, t = os.clock() })
+                if #api.Log > 4 then
+                        table.remove(api.Log)
+                end
+        end)
+end
+
+-- AIMBUG (test animacji): petla spamuje AimState true/false co Interval ms.
+-- Przy strzale (TryFire) AimState = true natychmiast i jest trzymane, az Fire
+-- event przejdzie - wtedy petla wraca do naprzemiennego spamu.
+local aimBugValue = false -- ostatnio wyslana wartosc (podglad w debug overlay)
+local aimBugCount = 0
+local aimBugHold = false -- true = strzal w toku: trzymamy true, petla czeka
+
+local function aimBugSend(v)
+        if not AimStateEvent then
+                return false
+        end
+        local okSend, err = pcall(function()
+                AimStateEvent:FireServer(v)
+        end)
+        if not okSend then
+                warn("[HoundsHook] AimBug: FireServer nieudany: " .. tostring(err))
+        end
+        return okSend
+end
+
+task.spawn(function()
+        if not AimStateEvent then
+                -- czekamy maks. 10 s na dołączenie remote'a
+                local okE, e = pcall(function()
+                        return ReplicatedStorage:WaitForChild("Rojo", 10):WaitForChild("Remotes", 10):WaitForChild("AimState", 10)
+                end)
+                AimStateEvent = okE and e or nil
+        end
+        if not AimStateEvent then
+                warn("[HoundsHook] AimBug: brak RemoteEvent 'AimState' w Rojo/Remotes")
                 return
         end
-        HHState.WC = WC
-        HHState.origTryFire = WC.TryFire
+        print("[HoundsHook] AimBug: remote AimState znaleziony")
+
+        local wasOn = false
+        while not HHUnloaded do
+                local on = Config.AimBug.Enabled
+                if on then
+                        if not wasOn then
+                                aimBugValue = false -- każde włączenie: start od true
+                        end
+                        if not aimBugHold then
+                                aimBugValue = not aimBugValue
+                                aimBugCount = aimBugCount + 1
+                                aimBugSend(aimBugValue)
+                        end
+                end
+                wasOn = on
+                task.wait(math.max(20, Config.AimBug.Interval or 50) / 1000)
+        end
+end)
+
+-- BUGROLL: spam remota Roll (protokol z dekompilu RollController):
+-- Roll:FireServer("Start", dir) / ("End") / ("Cancel")
+-- Tryb "Ciągły": co Interval ms "Start". Tryb "Start+End": Start -> po Interval
+-- koniec (End/Cancel) -> po Pause ms kolejny cykl. Kierunek = kamera.
+local bugRollCount = 0
+
+local function rollDir()
+        local lv = Camera.CFrame.LookVector
+        local d = Vector3.new(lv.X, 0, lv.Z)
+        if d.Magnitude > 0.01 then
+                return d.Unit
+        end
+        return Vector3.new(0, 0, -1)
+end
+
+local function bugRollSend(action, dir)
+        if not RollEvent then
+                return false
+        end
+        local okSend, err
+        if action == "Start" then
+                okSend, err = pcall(function()
+                        RollEvent:FireServer("Start", dir or rollDir())
+                end)
+        else
+                okSend, err = pcall(function()
+                        RollEvent:FireServer(action)
+                end)
+        end
+        if not okSend then
+                warn("[HoundsHook] BugRoll: FireServer nieudany: " .. tostring(err))
+        end
+        return okSend
+end
+
+task.spawn(function()
+        if not RollEvent then
+                local okE, e = pcall(function()
+                        return ReplicatedStorage:WaitForChild("Rojo", 10):WaitForChild("Remotes", 10):WaitForChild("Roll", 10)
+                end)
+                RollEvent = okE and e or nil
+        end
+        if not RollEvent then
+                warn("[HoundsHook] BugRoll: brak RemoteEvent 'Roll' w Rojo/Remotes")
+                return
+        end
+        print("[HoundsHook] BugRoll: remote Roll znaleziony")
+
+        while not HHUnloaded do
+                if Config.BugRoll.Enabled then
+                        bugRollCount = bugRollCount + 1
+                        bugRollSend("Start")
+                        task.wait(math.max(20, Config.BugRoll.Interval or 50) / 1000)
+                        if Config.BugRoll.Mode == "Start+End" then
+                                bugRollSend(Config.BugRoll.EndPacket or "End")
+                                task.wait(math.max(20, Config.BugRoll.Pause or 100) / 1000)
+                        end
+                else
+                        task.wait(0.1)
+                end
+        end
+end)
+
+------------------------------------------------------------------
+-- [8] HOOK BRONI: WeaponClient.TryFire/Reload/CancelReload (z v3)
+--     Silent Aim + No Reload v3 (3 tryby) + AimBug hold - v4-proof
+------------------------------------------------------------------
+local HHState = { tryFireHooked = false }
+local hookedOriginals = {} -- [modul] = { TryFire=, Reload=, CancelReload=, AddRecoil=, Shake=, Kick= }
+local hookedWeaponClient = false
+local hookWeaponClientError = "brak"
+local lastTopUp = 0
+local topUpCount = 0
+
+-- Odczyt amunicji z GetAmmoText (konwencja gry "x / y")
+local function parseAmmo()
+        local mod = WeaponClientMod
+        if not (mod and mod.GetAmmoText) then
+                return nil, nil
+        end
+        local ok, txt = pcall(mod.GetAmmoText)
+        if not ok or type(txt) ~= "string" then
+                return nil, nil
+        end
+        local m, mx = string.match(txt, "^(%d+)%s*/%s*(%d+)$")
+        if m and mx then
+                return tonumber(m), tonumber(mx)
+        end
+        return nil, nil -- "Reloading"
+end
+
+local function instantFinish(reason)
+        if not Config.NoReload.Enabled then
+                return
+        end
+        -- Dokańcza reload natychmiast po SkipTime (mechanika FastReload: CancelReload(true))
+        local skip = math.max(0.05, Config.NoReload.SkipTime or 0.35)
+        task.delay(skip, function()
+                if HHUnloaded or not WeaponClientMod then
+                        return
+                end
+                pcall(function()
+                        if WeaponClientMod.IsReloading and WeaponClientMod.IsReloading() then
+                                WeaponClientMod.CancelReload(true)
+                                logHook("NoReload", string.format("reload dokończony natychmiast (%s)", reason or "auto"))
+                        end
+                end)
+        end)
+end
+
+local function hookWeaponClient(mod)
+        if HHState.tryFireHooked or type(mod) ~= "table" then
+                return
+        end
+        if type(mod.TryFire) ~= "function" then
+                return
+        end
+
+        WeaponClientMod = mod
+        hookedWeaponClient = true
         HHState.tryFireHooked = true
 
-        WC.TryFire = function(w, vm, aimCF, ...)
-                if typeof(w) == "Instance" and HHState.weaponInstance ~= w then
-                        HHState.weaponInstance = w
-                        -- diagnostyka: wypisz atrybuty broni raz (pomaga doszlifowac No Reload)
-                        pcall(function()
-                                local names = {}
-                                for _, attrName in ipairs(w:GetAttributes()) do
-                                        table.insert(names, attrName .. "=" .. tostring(w:GetAttribute(attrName)))
-                                end
-                                print("[HoundsHook] Bron: " .. w.Name .. " | atrybuty: " .. table.concat(names, ", "))
-                        end)
+        local origTryFire = mod.TryFire
+        local origReload = mod.Reload
+        local origCancel = (type(mod.CancelReload) == "function") and mod.CancelReload or nil
+        hookedOriginals[mod] = { TryFire = origTryFire, Reload = origReload, CancelReload = origCancel }
+
+        -- wrapper Reload: po starcie reloadu zaplanuj natychmiastowe dokończenie
+        mod.Reload = function(...)
+                instantFinish("start")
+                return origReload(...)
+        end
+
+        -- wrapper TryFire: silent aim + no-reload (strzał przerywa reload) + AimBug hold
+        mod.TryFire = function(char, viewmodel, aimCF, ...)
+                if viewmodel ~= nil then
+                        lastViewmodel = viewmodel -- cache dla AutoShoot
                 end
-                -- pSilent wygrywa (nadpisuje zdalny strzal) - nie ruszaj aimCF
+                local nr = Config.NoReload
+                if nr.Enabled and nr.UnblockShots and origCancel and mod.IsReloading and mod.IsReloading() then
+                        pcall(origCancel, true) -- przerywa reload BEZ informowania serwera (FastReload)
+                end
+
+                -- Silent Aim (wyłączany gdy działa pSilent - Fire i tak jest nadpisywany)
                 if not Config.pSilent.Enabled then
                         local part, pos = API.GetSilentTarget()
                         if part and pos and typeof(aimCF) == "CFrame" and (pos - aimCF.Position).Magnitude > 0.5 then
                                 aimCF = CFrame.lookAt(aimCF.Position, pos)
                         end
                 end
-                if Config.NoReload.Enabled then
-                        local snap = snapshotAmmo(w)
-                        local res = table.pack(HHState.origTryFire(w, vm, aimCF, ...))
-                        restoreAmmo(w, snap)
-                        return table.unpack(res, 1, res.n)
+
+                -- AIMBUG: strzał -> natychmiast AimState = true (pętla wstrzymana na czas strzału)
+                if Config.AimBug.Enabled then
+                        aimBugHold = true
+                        aimBugValue = true
+                        aimBugCount = aimBugCount + 1
+                        aimBugSend(true)
                 end
-                return HHState.origTryFire(w, vm, aimCF, ...)
+
+                local res = origTryFire(char, viewmodel, aimCF, ...)
+
+                -- Fire event przeszedł (albo strzał się nie odbył) -> zwalniamy pętlę
+                aimBugHold = false
+
+                -- nie strzeliło (pusty magazynek) - gra sama odpala Reload przy 0,
+                -- a nasz wrapper Reload dokończy go natychmiast
+                if nr.Enabled and res == false then
+                        instantFinish("pusty magazynek")
+                end
+                return res
         end
 
-        -- NO RELOAD: blokada funkcji Reload
-        if type(WC.Reload) == "function" then
-                HHState.origReload = WC.Reload
-                WC.Reload = function(...)
-                        if Config.NoReload.Enabled then
-                                return
-                        end
-                        return HHState.origReload(...)
-                end
-                HHState.reloadBlocked = true
-        end
-
-        print("[HoundsHook] Hook WeaponClient OK (TryFire" .. (HHState.reloadBlocked and " + Reload" or "") .. ")")
+        print("[HoundsHook] Auto-hook WeaponClient OK (TryFire + Reload" .. (origCancel and " + CancelReload" or "") .. ")")
         notify("Silent Aim", "Podpiety pod bron (TryFire hook OK)", "crosshair", 4)
+
+        -- Top-Up poller: utrzymuje magazynek pełny (tryb Full)
+        task.spawn(function()
+                while not HHUnloaded do
+                        task.wait(0.25)
+                        local nr = Config.NoReload
+                        if nr.Enabled and nr.Mode == "Full (Top-Up)" and WeaponClientMod then
+                                pcall(function()
+                                        if WeaponClientMod.IsReloading and WeaponClientMod.IsReloading() then
+                                                return
+                                        end
+                                        local mag, mx = parseAmmo()
+                                        if mag and mx and mx > 0 and mag < mx and mag <= mx * (nr.TopUpAt / 100) then
+                                                if os.clock() - lastTopUp > math.max(0.3, nr.Cooldown) then
+                                                        lastTopUp = os.clock()
+                                                        topUpCount = topUpCount + 1
+                                                        logHook("NoReload", string.format("Top-Up start (mag %d/%d, raz #%d)", mag, mx, topUpCount))
+                                                        mod.Reload() -- wrapper dokończy natychmiast po SkipTime
+                                                end
+                                        end
+                                end)
+                        end
+                end
+        end)
 end
 
 local function findWeaponClient()
@@ -16314,179 +16520,172 @@ task.spawn(function()
                 end
                 local WC = findWeaponClient()
                 if WC then
-                        wrapWeaponClient(WC)
+                        hookWeaponClient(WC)
                         return
                 end
                 task.wait(2)
         end
 end)
 
--- CIAGLY PIN AMUNICJI (druga warstwa No Reload): nauczone pola trzymamy
--- na najwyzszej widzianej wartosci, amunicja nigdy nie spada
-bind(RunService.Heartbeat, function()
-        if not Config.NoReload.Enabled or not HHState.weaponInstance then
-                return
-        end
-        local w = HHState.weaponInstance
-        if not w.Parent then
-                HHState.weaponInstance = nil
-                return
-        end
-        pcall(function()
-                if typeof(w) == "Instance" then
-                        for name in pairs(HHState.restoredKeys) do
-                                local now = w:GetAttribute(name)
-                                local hw = HHState.highWater[name]
-                                if type(now) == "number" and hw and now < hw then
-                                        w:SetAttribute(name, hw)
-                                end
-                        end
-                end
-        end)
-end)
-
 ------------------------------------------------------------------
--- [9] pSILENT: HOOK REMOTOW (Look / AimSample / Fire) - executor
+-- [9] pSILENT v18 - stan namierzenia + HOOK __namecall (fail-safe)
 ------------------------------------------------------------------
-local LookEvent, AimSampleEvent, FireEvent
-do
-        local ok, Remotes = pcall(function()
-                return ReplicatedStorage:WaitForChild("Rojo", 8):WaitForChild("Remotes", 8)
-        end)
-        if ok and Remotes then
-                LookEvent = Remotes:FindFirstChild("Look")
-                AimSampleEvent = Remotes:FindFirstChild("AimSample")
-                FireEvent = Remotes:FindFirstChild("Fire")
-        end
-end
-
 local pSilentHooked = false
 local pSilentHookError = "brak"
 local mtHook
 
--- FIX v5.1: shared.HoundsHook wskazuje na API JUZ OD TERAZ (jedna tabela
--- do konca zycia skryptu). Wczesniej logHook pisal do tymczasowej tabeli
--- z sekcji [9], a na koncu skryptu robilismy shared.HoundsHook = API
--- (bez pola Log) -> hook crashowal: "insert (table expected, got nil)",
--- a blad lecial do skryptow gry (Rojo_AimSampler) i wywalal strzelanie.
-shared.HoundsHook = API
-API.Log = {}
-
-local lastHookWarn = 0
-local function warnHookOnce(info)
-        if os.clock() - lastHookWarn < 2 then
-                return
+-- Liczy WSZYSTKO, czego potrzebują hooki (dir/kąty/dist/hit) względem zadanego
+-- origin. Wołane co klatkę (origin = kamera) oraz tuż przed strzałem (origin
+-- broni) - dzięki temu próbki wysłane przed Fire są IDENTYCZNE jak kierunek strzału.
+local function computeAimState(origin)
+        local HH = shared.HoundsHook
+        local tgt = HH and HH.pSilentTarget
+        if not tgt then
+                return nil
         end
-        lastHookWarn = os.clock()
-        warn("[HoundsHook] pSilent hook -> odpuszcza, leci oryginal: " .. info)
+        local ps = Config.pSilent
+
+        -- pozycja celu + opcjonalne wyprzedzenie (lead ms + ping)
+        local aimPos = tgt.Position
+        local T = 0
+        if ps.Lead and ps.Lead > 0 then
+                T = T + ps.Lead / 1000
+        end
+        if ps.PingComp then
+                T = T + ping
+        end
+        if T > 0 then
+                local ok, vel = pcall(function()
+                        return tgt.AssemblyLinearVelocity
+                end)
+                if ok and vel then
+                        aimPos = aimPos + vel * T
+                end
+        end
+
+        local delta = aimPos - origin
+        local dist = delta.Magnitude
+        if dist < 0.1 then
+                return nil
+        end
+        local dir = delta / dist
+
+        -- trafienie: ten sam raycast co gra (BulletCast), łapie też akcesoria po drodze
+        local params = RaycastParams.new()
+        params.FilterType = Enum.RaycastFilterType.Exclude
+        params.FilterDescendantsInstances = { LP.Character, Camera }
+        local result = nil
+        if BulletCast then
+                local okr, r = pcall(BulletCast.Raycast, Workspace, origin, dir * 3000, params)
+                if okr then
+                        result = r
+                end
+        end
+        if not result then
+                result = Workspace:Raycast(origin, dir * 3000, params)
+        end
+
+        local hitPart, hitPos
+        if result and result.Instance and result.Instance:IsDescendantOf(tgt.Parent) then
+                hitPart, hitPos = result.Instance, result.Position
+        else
+                -- ściana/przeszkoda: ignorujemy i zgłaszamy bezpośrednio cel
+                hitPart, hitPos = tgt, aimPos
+        end
+
+        -- kąty dla Look (yaw względem korpusu postaci)
+        local worldYaw = math.atan2(-dir.X, -dir.Z)
+        local relYaw = (worldYaw - (HH.pSilentCharYaw or 0) + math.pi) % (2 * math.pi) - math.pi
+        local pitch = math.asin(math.clamp(dir.Y, -1, 1))
+
+        HH.pSilentAimPos = aimPos
+        HH.pSilentDir = dir
+        HH.pSilentDist = dist
+        HH.pSilentRelYaw = relYaw
+        HH.pSilentPitch = pitch
+        HH.pSilentHit = hitPart
+        HH.pSilentHitPos = hitPos
+        return dir, aimPos, dist
 end
 
-local function logHook(name, info)
-        print(string.format("[HoundsHook] %s: %s", name, info))
-        -- fail-safe: log NIGDY nie moze zabij hooka (to wywalilo v5)
+-- Własna para Look+AimSample z AKTUALNEGO stanu (spójna z tym, co podmienia hook)
+local function sendSamples()
+        local HH = shared.HoundsHook
+        if not (LookEvent and AimSampleEvent and HH and HH.pSilentDir) then
+                return
+        end
         pcall(function()
-                local api = shared.HoundsHook
-                if typeof(api) ~= "table" then
-                        return
-                end
-                if typeof(api.Log) ~= "table" then
-                        api.Log = {}
-                end
-                table.insert(api.Log, 1, { name = name, info = info, t = os.clock() })
-                if #api.Log > 4 then
-                        table.remove(api.Log)
-                end
+                LookEvent:FireServer(HH.pSilentRelYaw, HH.pSilentPitch, math.max(2, HH.pSilentDist))
+        end)
+        pcall(function()
+                AimSampleEvent:FireServer(HH.pSilentDir, os.clock()) -- ts w konwencji gry (os.clock)
         end)
 end
 
--- Podmienia argumenty Look/AimSample/Fire pod pSilent.
--- Zwraca true (args podmienione) albo false (przepusc oryginal bez zmian).
--- Hook wywoluje to w pcall: zadny blad predykcji/raycastu nie przerwie
--- FireServer ani nie wywali skryptow gry.
+-- v18: podmienia argumenty Look/AimSample/Fire na spójny kierunek do celu.
+-- Zwraca true (args podmienione) albo false (przepuść oryginał). Wywoływane
+-- w pcall po stronie hooka: żaden błąd nie przerwie FireServer ani nie
+-- wywali skryptów gry (lekcja z v5: crash w __namecall zabija strzelanie).
 local function patchFireArgs(self, args)
         local ps = Config.pSilent
-        if not ps or not ps.Enabled then
+        local HH = shared.HoundsHook
+        if not ps or not ps.Enabled or not HH then
                 return false
         end
-        local api = shared.HoundsHook
-        local tgt = api and api.pSilentTarget
-        if not tgt then
+        local tgt = HH.pSilentTarget
+        if not tgt or not HH.pSilentDir then
                 return false
         end
 
-        local isLook = rawequal(self, LookEvent) and ps.HookLook
-        local isAim = rawequal(self, AimSampleEvent) and ps.HookAimSample
+        local isLook = rawequal(self, LookEvent) and ps.RewriteLook
+        local isAim = rawequal(self, AimSampleEvent) and ps.RewriteSamples
         local isFire = rawequal(self, FireEvent) and ps.HookFire
         if not (isLook or isAim or isFire) then
                 return false
         end
 
-        local camPos = Camera.CFrame.Position
-        local charYaw = api.pSilentCharYaw or 0
-        local tgtChar = tgt.Parent
-
-        -- v5: cel z predykcja balistyczna (lead + spadek grawitacji)
-        local aimPos = predictShotPos(tgt)
-        local rel = aimPos - camPos
-        local dir = rel.Unit
-
-        local worldYaw = math.atan2(-dir.X, -dir.Z)
-        local relYaw = (worldYaw - charYaw + math.pi) % (2 * math.pi) - math.pi
-        local pitch = math.asin(math.clamp(dir.Y, -1, 1))
-
-        if isLook then
-                -- Oryginal: Look:FireServer(relYaw, pitch, dist)
-                if args.n < 4 then
-                        return false
-                end
-                args[2] = relYaw
-                args[3] = pitch
-                args[4] = math.max(2, rel.Magnitude)
-                logHook(
-                        "Look",
-                        string.format(
-                                "Yaw: %.2f, Pitch: %.2f, Dist: %.1f (drop %s)",
-                                relYaw,
-                                pitch,
-                                args[4],
-                                tostring(ps.DropComp)
-                        )
-                )
-                return true
-        elseif isAim then
-                -- Oryginal: AimSample:FireServer(dir, ts)
+        if isAim then
+                -- AimSample:FireServer(dir, ts) -> kierunek = fałszywy cel
+                -- (łapie też AimSampler.SendNow() odpalany tuż przed strzałem!)
                 if args.n < 3 then
                         return false
                 end
-                args[2] = dir
-                local nm = tgtChar and tgtChar.Name or "?"
-                logHook("AimSample", string.format("Cel: %s", nm))
+                args[2] = HH.pSilentDir
+                return true
+        elseif isLook then
+                -- Look:FireServer(relYaw, pitch, dist) -> fałszywe kąty widoku
+                if args.n < 4 then
+                        return false
+                end
+                args[2] = HH.pSilentRelYaw
+                args[3] = HH.pSilentPitch
+                args[4] = math.max(2, HH.pSilentDist)
                 return true
         elseif isFire then
-                -- Oryginal: Fire:FireServer(origin, dir, hitInstance, hitPos, dir2, ts)
+                -- Fire:FireServer(origin, dir, hitInstance, hitPos, dir2, ts)
                 if args.n < 7 then
                         return false
                 end
                 local origin = args[2]
-                local dirToAim = (aimPos - origin).Unit
-                args[3] = dirToAim
 
-                -- zgloszone trafienie = promien wzdłuż skompensowanego kierunku
-                local hitInst, hitPos
-                local result = shotRaycast(origin, dirToAim * 3000, nil)
-                if result and result.Instance and tgtChar and result.Instance:IsDescendantOf(tgtChar) then
-                        hitInst = result.Instance
-                        hitPos = result.Position
-                else
-                        -- hedz: serwer i tak liczy z kierunku, zglos cel bezposrednio
-                        hitInst = tgt
-                        hitPos = tgt.Position
+                -- PRE-FIRE SYNC: przelicz stan DOKŁADNIE od origin broni i wyślij
+                -- Look+AimSample, żeby serwer dostał spójny zestaw:
+                -- [Look] -> [AimSample] -> [Fire] - wszystko w jednym kierunku
+                if ps.PreFireSync then
+                        computeAimState(origin)
+                        sendSamples()
                 end
-                args[4] = hitInst
-                args[5] = hitPos
-                args[6] = dirToAim
 
-                logHook("Fire", string.format("Hit -> %s (dropComp=%s)", hitInst.Name, tostring(ps.DropComp)))
+                local aimPos = HH.pSilentAimPos or tgt.Position
+                local delta = aimPos - origin
+                if delta.Magnitude < 0.1 then
+                        return false
+                end
+                local dirToAim = delta.Unit
+                args[3] = dirToAim
+                args[4] = HH.pSilentHit or tgt
+                args[5] = HH.pSilentHitPos or aimPos
+                args[6] = dirToAim
                 return true
         end
 
@@ -16502,6 +16701,7 @@ if LookEvent and AimSampleEvent and FireEvent then
                 local ncWrap = newcclosure or function(f)
                         return f
                 end
+                local lastLookLog, lastAimLog = 0, 0 -- throttling logów (strumień próbek)
                 local ok, err = pcall(function()
                         mtHook = hookmetamethod(game, "__namecall", ncWrap(function(...)
                                 local method = getnamecallmethod()
@@ -16511,12 +16711,29 @@ if LookEvent and AimSampleEvent and FireEvent then
                                 end
 
                                 local args = table.pack(...)
-                                -- praca na KOPII argumentow: przy bledzie przepuszczamy
-                                -- czyste oryginalne args, nigdy pol-udane podmienienie
+                                -- praca na KOPII argumentów: przy błędzie przepuszczamy
+                                -- czyste oryginalne args, nigdy pół-udane podmienienie
                                 local patch = table.pack(table.unpack(args, 1, args.n))
                                 local okP, patched = pcall(patchFireArgs, patch[1], patch)
 
                                 if okP and patched then
+                                        local HH = shared.HoundsHook
+                                        -- logi z throttlingiem (strumień leci z częstotliwością próbek)
+                                        if rawequal(patch[1], AimSampleEvent) and os.clock() - lastAimLog > 0.5 then
+                                                lastAimLog = os.clock()
+                                                local tgt = HH and HH.pSilentTarget
+                                                logHook("AimSample", tgt and string.format("dir -> %s.%s", tgt.Parent.Name, tgt.Name) or "dir -> ?")
+                                        elseif rawequal(patch[1], LookEvent) and os.clock() - lastLookLog > 0.5 then
+                                                lastLookLog = os.clock()
+                                                logHook("Look", string.format("yaw %.2f, pitch %.2f, dist %.0f",
+                                                        (HH and HH.pSilentRelYaw) or 0, (HH and HH.pSilentPitch) or 0, (HH and HH.pSilentDist) or 0))
+                                        elseif rawequal(patch[1], FireEvent) then
+                                                local tgt = HH and HH.pSilentTarget
+                                                local hitName = patch[4] and patch[4].Name or "None"
+                                                logHook("Fire", string.format("-> %s.%s (dist %.0f m)", hitName,
+                                                        (tgt and tgt.Parent.Name) or "?", (HH and HH.pSilentDist) or 0))
+                                        end
+
                                         local Result = table.pack(mtHook(table.unpack(patch, 1, patch.n)))
                                         return table.unpack(Result, 1, Result.n)
                                 elseif not okP then
@@ -16526,7 +16743,7 @@ if LookEvent and AimSampleEvent and FireEvent then
                                 return mtHook(table.unpack(args, 1, args.n))
                         end))
                         pSilentHooked = true
-                        print("[HoundsHook] pSilent hook installed OK (balistyka v5.1, fail-safe)")
+                        print("[HoundsHook] pSilent v18 hook installed OK (fail-safe, merge v6)")
                 end)
                 if not ok then
                         pSilentHookError = tostring(err)
@@ -16534,8 +16751,83 @@ if LookEvent and AimSampleEvent and FireEvent then
                 end
         end
 else
-        pSilentHookError = "brak eventow Look/AimSample/Fire"
+        pSilentHookError = "brak eventów Look/AimSample/Fire (cache Rojo)"
 end
+
+------------------------------------------------------------------
+-- [9b] NOSPREAD - hook CameraController (AddRecoil + Shake) i Viewmodel (Kick)
+------------------------------------------------------------------
+-- Pocisk leci DOKŁADNIE po LookVector (z dekompilu TryFire: Fire:FireServer
+-- dostaje a3.LookVector bez żadnego losowego spreadu). To co rozjeżdża strzały
+-- przy AutoShoot to recoil kamery (AddRecoil), shake ekranu (Shake) i wizualny
+-- kick broni (Kick). Moduły są cache'owane przez Lua (require zwraca tę samą
+-- tabelę), więc podmiana funkcji na module łapie WSZYSTKICH konsumentów.
+local noSpreadHooked = false
+local noSpreadHookError = "brak"
+
+local function requireRojoScript(name)
+        local ok, res = pcall(function()
+                local ps = LP:WaitForChild("PlayerScripts", 10)
+                local rojo = ps and ps:WaitForChild("Rojo", 10)
+                local mod = rojo and rojo:WaitForChild(name, 10)
+                return mod and require(mod)
+        end)
+        if ok then
+                return res
+        end
+        return nil
+end
+
+task.spawn(function()
+        -- CameraController: AddRecoil + Shake
+        local cc = requireRojoScript("CameraController")
+        if HHUnloaded then
+                return
+        end
+        if typeof(cc) == "table" and type(cc.AddRecoil) == "function" then
+                local origRecoil = cc.AddRecoil
+                local origShake = (type(cc.Shake) == "function") and cc.Shake or nil
+                hookedOriginals[cc] = { AddRecoil = origRecoil, Shake = origShake }
+                cc.AddRecoil = function(...)
+                        if Config.NoSpread.Enabled and Config.NoSpread.Recoil then
+                                return -- kamera nie dostaje kicka pitch/yaw
+                        end
+                        return origRecoil(...)
+                end
+                if origShake then
+                        cc.Shake = function(...)
+                                if Config.NoSpread.Enabled and Config.NoSpread.Shake then
+                                        return -- bez trzęsienia ekranu
+                                end
+                                return origShake(...)
+                        end
+                end
+                noSpreadHooked = true
+                print("[HoundsHook] NoSpread: hook CameraController OK")
+        else
+                noSpreadHookError = tostring(cc)
+                warn("[HoundsHook] NoSpread: hook CameraController nieudany: ", noSpreadHookError)
+        end
+
+        -- Viewmodel: Kick (broń nie podskakuje przy strzale)
+        local vm = requireRojoScript("Viewmodel")
+        if HHUnloaded then
+                return
+        end
+        if typeof(vm) == "table" and type(vm.Kick) == "function" then
+                local origKick = vm.Kick
+                hookedOriginals[vm] = { Kick = origKick }
+                vm.Kick = function(...)
+                        if Config.NoSpread.Enabled and Config.NoSpread.Kick then
+                                return
+                        end
+                        return origKick(...)
+                end
+                print("[HoundsHook] NoSpread: hook Viewmodel OK")
+        else
+                warn("[HoundsHook] NoSpread: hook Viewmodel nieudany: ", typeof(vm) or "brak")
+        end
+end)
 
 ------------------------------------------------------------------
 -- [10] ESP - kolory: WIDOCZNY / NIEWIDOCZNY / PRZYJACIEL
@@ -17182,12 +17474,82 @@ local lockedPart
 local aimDelta = CFrame.identity
 local lastAngle = nil
 local fpsEma = 60
+local expectedCF, camOverwritten -- diagnostyka: czy inny skrypt nadpisuje kamere po aimbocie
+local lastAutoShot = 0 -- AutoShoot: czas ostatniego strzalu
+local spinAngle, spinPitch, spinPitchT = 0, 0, 0 -- Spinbot
+local spinbotAutoWas = nil -- Spinbot: oryginalne Humanoid.AutoRotate
+
+-- menu otwarte? (WindUI albo awaryjne menu - blokuje AutoShoot i aimbota)
+local function menuVisible()
+        if MenuOpen then
+                return true
+        end
+        if Window then
+                local ok, v = pcall(function()
+                        return Window.Open
+                end)
+                if ok and type(v) == "boolean" then
+                        return v
+                end
+        end
+        return false
+end
 
 bind(RunService.RenderStepped, function(dt)
         Camera = Workspace.CurrentCamera
         local mouse = UIS:GetMouseLocation()
         if dt > 0 then
                 fpsEma = fpsEma + (1 / dt - fpsEma) * 0.05
+        end
+        local HH = shared.HoundsHook
+
+        -- SPINBOT: obraca HumanoidRootPart w miejscu (klient jest ownerem fizyki
+        -- postaci, wiec obrot replikuje sie na serwer). AutoRotate wylaczany na
+        -- czas spinu. PITCH (anti-aim): raz w gore, raz w dol (Up/Down albo Sinus).
+        do
+                local spb = Config.Spinbot
+                local schar = LP.Character
+                local shrp = schar and schar:FindFirstChild("HumanoidRootPart")
+                local shum = schar and schar:FindFirstChildOfClass("Humanoid")
+                if spb.Enabled and shrp and shum and shum.Health > 0 then
+                        if spinbotAutoWas == nil then
+                                spinbotAutoWas = shum.AutoRotate
+                        end
+                        shum.AutoRotate = false
+                        local sdt = (typeof(dt) == "number" and dt) or 1 / 60
+                        spinAngle = (spinAngle + sdt * (spb.Speed or 10) * 360) % 360
+                        if spb.Pitch then
+                                local maxP = math.clamp(spb.PitchAngle or 85, 1, 89)
+                                local spd = math.max(0.1, spb.PitchSpeed or 2)
+                                spinPitchT = spinPitchT + sdt * spd
+                                if (spb.PitchMode or "Up/Down") == "Sinus" then
+                                        spinPitch = math.sin(spinPitchT * math.pi * 2) * maxP
+                                else
+                                        -- Up/Down: twarda zmiana +max/-max (typowy anti-aim flick)
+                                        spinPitch = (math.floor(spinPitchT) % 2 == 0) and maxP or -maxP
+                                end
+                        else
+                                spinPitch = 0
+                        end
+                        -- yaw po osi swiata, potem pitch po LOKALNEJ osi X
+                        shrp.CFrame = CFrame.new(shrp.Position)
+                                * CFrame.Angles(0, math.rad(spinAngle), 0)
+                                * CFrame.Angles(math.rad(spinPitch), 0, 0)
+                elseif spinbotAutoWas ~= nil then
+                        if shum then
+                                shum.AutoRotate = spinbotAutoWas
+                        end
+                        if shrp then
+                                -- po wylaczeniu stawiamy postac prosto (zostaje tylko yaw)
+                                pcall(function()
+                                        local _, yy, _ = shrp.CFrame:ToEulerAnglesYXZ()
+                                        shrp.CFrame = CFrame.new(shrp.Position) * CFrame.Angles(0, yy, 0)
+                                end)
+                        end
+                        spinbotAutoWas = nil
+                        spinPitch = 0
+                        spinPitchT = 0
+                end
         end
 
         -- FOV
@@ -17202,14 +17564,58 @@ bind(RunService.RenderStepped, function(dt)
         PSilentCircle.Size = UDim2.fromOffset(ps.Fov * 2, ps.Fov * 2)
         PSilentCircle.Position = UDim2.fromOffset(mouse.X, mouse.Y)
 
-        -- cel pSilent dla hooka (zapobiega rekurencji __namecall)
-        if shared.HoundsHook then
-                shared.HoundsHook.pSilentTarget = ps.Enabled and getTarget(ps) or nil
+        -- pSilent v18: cel + pelny stan namierzenia dla hookow
+        if HH then
+                HH.pSilentTarget = ps.Enabled and getTarget(ps) or nil
                 local char = LP.Character
                 local hrp = char and char:FindFirstChild("HumanoidRootPart")
                 if hrp then
                         local _
-                        _, shared.HoundsHook.pSilentCharYaw = hrp.CFrame:ToEulerAnglesYXZ()
+                        _, HH.pSilentCharYaw = hrp.CFrame:ToEulerAnglesYXZ()
+                end
+
+                if HH.pSilentTarget then
+                        computeAimState(Camera.CFrame.Position)
+
+                        -- Wymuszone probki: gra wysyla AimSample tylko przy ADS (IsAiming),
+                        -- to utrzymuje falszywy widok na serwerze tez przy hipfire.
+                        if ps.ForceSampler then
+                                local now = os.clock()
+                                if now - (HH.lastForce or 0) > math.max(0.005, ps.UpdateRate / 1000) then
+                                        HH.lastForce = now
+                                        sendSamples()
+                                end
+                        end
+                else
+                        HH.pSilentDir = nil
+                        HH.pSilentAimPos = nil
+                        HH.pSilentHit = nil
+                        HH.pSilentHitPos = nil
+                end
+        end
+
+        -- AUTOSHOOT: sam odpala TryFire, gdy cel w FOV (pelna sciezka gry:
+        -- FireRate, ammo, dzwiek, Fire remote). Wywoluje WRAPPER, wiec
+        -- Silent/pSilent/NoReload/AimBug dzialaja jak przy normalnym strzale.
+        do
+                local au = Config.AutoShoot
+                if au.Enabled and WeaponClientMod and not menuVisible() then
+                        local rate = GameConfig and GameConfig.Weapon and GameConfig.Weapon.FireRate
+                        local interval = (au.Delay and au.Delay > 0) and au.Delay / 1000 or (rate and rate > 0 and rate or 0.12)
+                        if os.clock() - lastAutoShot >= math.max(0.03, interval) and keyHeld(au.Key) then
+                                local tgt = getTarget(au)
+                                -- MaxDist: odcinaj cele dalej niz limit (0 = bez limitu)
+                                if tgt and (au.MaxDist or 0) > 0 then
+                                        local ahrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+                                        if ahrp and (tgt.Position - ahrp.Position).Magnitude > au.MaxDist then
+                                                tgt = nil
+                                        end
+                                end
+                                if tgt and lastViewmodel ~= nil then
+                                        lastAutoShot = os.clock()
+                                        pcall(WeaponClientMod.TryFire, LP.Character, lastViewmodel, Camera.CFrame)
+                                end
+                        end
                 end
         end
 
@@ -17236,19 +17642,18 @@ bind(RunService.RenderStepped, function(dt)
         SilentDot.Visible = shown
         SilentLabel.Visible = shown
 
-        -- Marker pSilent (pokazuje PUNKT z predykcja balistyczna)
-        local psTgt = (ps.Enabled and ps.ShowTarget) and shared.HoundsHook.pSilentTarget or nil
+        -- Marker pSilent (pokazuje punkt z wyprzedzeniem, jesli Lead/PingComp wlaczone)
         local psShown = false
-        if psTgt then
-                local aimPos = predictShotPos(psTgt)
-                local sp, on = Camera:WorldToViewportPoint(aimPos)
+        if HH and ps.Enabled and ps.ShowTarget and HH.pSilentTarget then
+                local psTgt = HH.pSilentTarget
+                local aimP = HH.pSilentAimPos or psTgt.Position
+                local sp, on = Camera:WorldToViewportPoint(aimP)
                 if on then
                         local p = Vector2.new(sp.X, sp.Y)
                         drawLine(PSilentLine, mouse, p, PSilentColor)
                         PSilentDot.Position = UDim2.fromOffset(p.X, p.Y)
                         PSilentLabel.Position = UDim2.fromOffset(p.X, p.Y + 9)
-                        local dist = (aimPos - Camera.CFrame.Position).Magnitude
-                        PSilentLabel.Text = string.format("[pSilent] %.0fm %s", dist, psTgt.Parent.Name)
+                        PSilentLabel.Text = string.format("[pSilent] %s.%s (%.0f m)", psTgt.Parent.Name, psTgt.Name, HH.pSilentDist or 0)
                         psShown = true
                 end
         end
@@ -17292,7 +17697,7 @@ bind(RunService.RenderStepped, function(dt)
                 Watermark.Text = table.concat(parts, "  •  ")
         end
 
-        -- Debug
+        -- Debug: dlaczego aimbot / silent / pSilent dziala albo nie
         DebugLabel.Visible = Config.Global.Debug
         if Config.Global.Debug then
                 local lines = {}
@@ -17303,7 +17708,7 @@ bind(RunService.RenderStepped, function(dt)
                         end
                         local t = getTarget(cfg)
                         if t then
-                                table.insert(lines, string.format("%s: cel %s.%s%s", name, t.Parent.Name, t.Name, extra or ""))
+                                table.insert(lines, string.format("%s: cel %s.%s%s", name, t.Parent.Name, t.Name, extra))
                         elseif getTarget(cfg, true) then
                                 table.insert(lines, name .. ": cel jest, ale blokuje go Wall Check")
                         else
@@ -17312,22 +17717,59 @@ bind(RunService.RenderStepped, function(dt)
                 end
                 report("Aimbot", a, keyHeld(a.Key) and " (klawisz OK)" or " (klawisz NIE wcisniety)")
                 report("Silent", s, "")
-                local psState = pSilentHooked and " (hook OK)" or (" (BLAD: " .. pSilentHookError .. ")")
-                report("pSilent", ps, psState)
+
+                -- pSilent v18 + logi hookow
+                local psLog = HH and HH.Log or {}
+                local logText = ""
+                for _, entry in ipairs(psLog) do
+                        logText = logText .. string.format("\n  [%s] %s", entry.name, entry.info)
+                end
+                report("pSilent", ps, pSilentHooked and " (v18 OK)" .. logText or (" (BLAD: " .. pSilentHookError .. ")"))
+
+                -- dystans vs MaxRange broni (serwer odrzuca trafienia poza MaxRange!)
+                if HH and HH.pSilentTarget and HH.pSilentDist then
+                        local wr = GameConfig and GameConfig.Weapon
+                        local maxR = wr and wr.MaxRange
+                        if maxR then
+                                local mark = HH.pSilentDist > maxR and "  <<< POZA MaxRange - serwer odrzuci!" or ""
+                                table.insert(lines, string.format("pSilent: dystans %.0f / MaxRange %.0f m%s", HH.pSilentDist, maxR, mark))
+                        else
+                                table.insert(lines, string.format("pSilent: dystans %.0f m", HH.pSilentDist))
+                        end
+                end
+                table.insert(lines, string.format("Ping: %.0f ms | Hook TryFire: %s", ping * 1000, hookedWeaponClient and "OK" or ("BLAD: " .. hookWeaponClientError)))
+                if camOverwritten ~= nil then
+                        table.insert(lines, camOverwritten and "Kamera: NADPISANA przez inny skrypt po aimbocie" or "Kamera: aimbot obraca ja poprawnie")
+                end
+                local mag, mx = parseAmmo()
+                if mag then
+                        table.insert(lines, string.format("Magazynek: %d / %d | No-Reload: %s", mag, mx, Config.NoReload.Enabled and Config.NoReload.Mode or "Off"))
+                end
                 if lastAngle then
                         table.insert(lines, string.format("Aimbot: pozostaly kat: %.1f stopni", lastAngle))
                 end
                 if API.LastCall then
                         table.insert(lines, string.format("Bron -> GetSilentTarget: %.1fs temu", os.clock() - API.LastCall))
-                else
-                        table.insert(lines, "Bron -> GetSilentTarget: NIGDY")
                 end
-                table.insert(
-                        lines,
-                        "No Reload: " .. (Config.NoReload.Enabled and (HHState.reloadBlocked and "ON (reload zablokowany)" or "ON (brak hooka Reload)") or "OFF")
-                )
-                local nr = #friendNames()
-                table.insert(lines, "Przyjaciele: " .. nr .. " (ignorowani przez cele)")
+                local nrF = #friendNames()
+                table.insert(lines, "Przyjaciele: " .. nrF .. " (ignorowani przez cele)")
+                table.insert(lines, string.format("AimBug: %s%s | wyslano #%d, ostatnia: %s", Config.AimBug.Enabled and "ON" or "OFF", aimBugHold and " (HOLD - strzal w toku)" or "", aimBugCount, tostring(aimBugValue)))
+                table.insert(lines, string.format("BugRoll: %s (%s) | cykli #%d", Config.BugRoll.Enabled and "ON" or "OFF", Config.BugRoll.Mode, bugRollCount))
+                local auD = Config.AutoShoot
+                local auTgt = auD.Enabled and getTarget(auD) or nil
+                local auDist = "brak celu"
+                if auTgt then
+                        local ahrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+                        local ad = ahrp and (auTgt.Position - ahrp.Position).Magnitude or 0
+                        auDist = string.format("%.0f m", ad)
+                        if (auD.MaxDist or 0) > 0 and ad > auD.MaxDist then
+                                auDist = auDist .. " POZA MaxDist!"
+                        end
+                end
+                table.insert(lines, string.format("AutoShoot: %s | cel: %s | dystans: %s | viewmodel: %s", auD.Enabled and "ON" or "OFF", auTgt and "TAK" or "brak", auDist, lastViewmodel and "OK" or "strzel raz recznie"))
+                local spbD = Config.Spinbot
+                table.insert(lines, string.format("Spinbot: %s (%.0f obr/s%s)", spbD.Enabled and "ON" or "OFF", spbD.Speed or 10, (spbD.Enabled and spbD.Pitch) and string.format(", pitch %s %.0f stopni", spbD.PitchMode or "Up/Down", spinPitch) or ""))
+                table.insert(lines, string.format("NoSpread: %s (hook %s)", Config.NoSpread.Enabled and "ON" or "OFF", noSpreadHooked and "OK" or ("BLAD: " .. noSpreadHookError)))
                 DebugLabel.Text = table.concat(lines, "\n")
         end
 end)
@@ -17408,9 +17850,18 @@ local function stepAimbot(dt)
         end
 
         Camera.CFrame = (aimDelta * baseRot) + basePos
+        expectedCF = Camera.CFrame
 end
 
 RunService:BindToRenderStep("HH_Aimbot", Enum.RenderPriority.Last.Value + 1, stepAimbot)
+
+-- Po klatce sprawdzamy, czy ktos nadpisal kamere po nas (diagnostyka v3)
+bind(RunService.Heartbeat, function()
+        if expectedCF then
+                camOverwritten = (Camera.CFrame.LookVector - expectedCF.LookVector).Magnitude > 0.01
+                expectedCF = nil
+        end
+end)
 
 ------------------------------------------------------------------
 -- [15] ODBLOKOWANIE KURSORA PRZY OTWARTYM MENU
@@ -17547,58 +17998,148 @@ local function buildWindUIMenu()
         combatTab:Toggle({ Title = "Marker celu", Value = Config.Silent.ShowTarget, Flag = "silent_showtarget",
                 Callback = function(v) Config.Silent.ShowTarget = v end })
 
-        combatTab:Section({ Title = "pSILENT  •  BALISTYKA DO 200m", Icon = "target" })
+        combatTab:Section({ Title = "pSILENT v18  •  PRECYZJA DO 200m", Icon = "target" })
         combatTab:Toggle({ Title = "Włącz pSilent", Value = Config.pSilent.Enabled, Flag = "psilent_enabled",
                 Callback = function(v) Config.pSilent.Enabled = v end })
         combatTab:Dropdown({ Title = "Hitbox", Values = HitboxOptions, Value = Config.pSilent.Hitbox,
                 Flag = "psilent_hitbox", Callback = function(v) if v then Config.pSilent.Hitbox = v end end })
         combatTab:Slider({ Title = "FOV", Value = { Min = 10, Max = 500, Default = Config.pSilent.Fov }, Step = 5,
                 Flag = "psilent_fov", Callback = function(v) Config.pSilent.Fov = v end })
+        combatTab:Toggle({ Title = "Pokaż FOV", Value = Config.pSilent.ShowFov, Flag = "psilent_showfov",
+                Callback = function(v) Config.pSilent.ShowFov = v end })
         combatTab:Toggle({ Title = "Marker celu", Value = Config.pSilent.ShowTarget, Flag = "psilent_showtarget",
                 Callback = function(v) Config.pSilent.ShowTarget = v end })
-        combatTab:Slider({
-                Title = "Prędkość pocisku (studs/s)",
-                Desc = "Podstaw predykcji czasu lotu - dobierz pod bron",
-                Value = { Min = 100, Max = 3000, Default = Config.pSilent.BulletSpeed },
-                Step = 50, Flag = "psilent_speed",
-                Callback = function(v) Config.pSilent.BulletSpeed = v end,
-        })
-        combatTab:Toggle({
-                Title = "Kompensacja grawitacji",
-                Desc = "Celuje powyzej celu o spadek pocisku - kluczowa za 140m",
-                Value = Config.pSilent.DropComp, Flag = "psilent_drop",
-                Callback = function(v) Config.pSilent.DropComp = v end,
-        })
-        combatTab:Slider({ Title = "Maks. dystans", Value = { Min = 50, Max = 500, Default = Config.pSilent.MaxDistance },
-                Step = 10, Flag = "psilent_maxdist", Callback = function(v) Config.pSilent.MaxDistance = v end })
-        combatTab:Slider({ Title = "Prediction (dodatkowy lead)", Value = { Min = 0, Max = 300, Default = Config.pSilent.Prediction },
+        combatTab:Slider({ Title = "Prediction (wybór punktu)", Value = { Min = 0, Max = 300, Default = Config.pSilent.Prediction },
                 Step = 10, Flag = "psilent_pred", Callback = function(v) Config.pSilent.Prediction = v end })
 
+        combatTab:Section({ Title = "PRECYZJA v18 (dystans 140-200m)", Icon = "crosshair" })
+        combatTab:Toggle({ Title = "Rewrite AimSample", Desc = "Podmienia próbki kierunku gry (też SendNow tuż przed strzałem) na fałszywy cel",
+                Value = Config.pSilent.RewriteSamples, Flag = "ps_rewrite_samples",
+                Callback = function(v) Config.pSilent.RewriteSamples = v end })
+        combatTab:Toggle({ Title = "Rewrite Look", Desc = "Podmienia kąty widoku (Look) na fałszywe - spójny strumień do serwera",
+                Value = Config.pSilent.RewriteLook, Flag = "ps_rewrite_look",
+                Callback = function(v) Config.pSilent.RewriteLook = v end })
+        combatTab:Toggle({ Title = "Pre-Fire Sync", Desc = "Tuż przed Fire wysyła Look+AimSample z dokładnie tym samym kierunkiem od origin broni",
+                Value = Config.pSilent.PreFireSync, Flag = "ps_prefire",
+                Callback = function(v) Config.pSilent.PreFireSync = v end })
+        combatTab:Toggle({ Title = "Force Sampler (też bez ADS)", Desc = "Gra wysyła AimSample tylko przy ADS - to utrzymuje fałszywy widok przy hipfire",
+                Value = Config.pSilent.ForceSampler, Flag = "ps_force",
+                Callback = function(v) Config.pSilent.ForceSampler = v end })
+        combatTab:Slider({ Title = "Update Rate (ms)", Value = { Min = 10, Max = 100, Default = Config.pSilent.UpdateRate },
+                Step = 5, Flag = "ps_updaterate", Callback = function(v) Config.pSilent.UpdateRate = v end })
+
+        combatTab:Section({ Title = "KOMPENSACJA", Icon = "gauge" })
+        combatTab:Slider({ Title = "Lead (wyprzedzenie, ms)", Value = { Min = 0, Max = 400, Default = Config.pSilent.Lead },
+                Step = 10, Flag = "ps_lead", Callback = function(v) Config.pSilent.Lead = v end })
+        combatTab:Toggle({ Title = "Kompensacja pingu (GetNetworkPing)", Value = Config.pSilent.PingComp, Flag = "ps_pingcomp",
+                Callback = function(v) Config.pSilent.PingComp = v end })
+
         combatTab:Section({ Title = "HOOKI pSILENT", Icon = "link" })
-        combatTab:Toggle({ Title = "Hook Look (viewangles)", Value = Config.pSilent.HookLook, Flag = "ps_look",
-                Callback = function(v) Config.pSilent.HookLook = v end })
-        combatTab:Toggle({ Title = "Hook AimSample (kierunek)", Value = Config.pSilent.HookAimSample, Flag = "ps_aim",
-                Callback = function(v) Config.pSilent.HookAimSample = v end })
         combatTab:Toggle({ Title = "Hook Fire (hit + obiekt)", Value = Config.pSilent.HookFire, Flag = "ps_fire",
                 Callback = function(v) Config.pSilent.HookFire = v end })
+        combatTab:Paragraph({
+                Title = "Jak działa v18",
+                Desc = "Gra tuż przed strzałem wysyła AimSample z PRAWDZIWYM kierunkiem - v18 podmienia cały strumień (Look + AimSample + Fire) na jeden spójny kierunek do celu, także na 140-200m. Jeśli debug pokaże 'POZA MaxRange', serwer i tak odrzuci trafienie - to limit broni po stronie serwera.",
+        })
 
         ---------------- WEAPON ----------------
         local weaponTab = Window:Tab({ Title = "Weapon", Icon = "swords" })
-        weaponTab:Section({ Title = "NO RELOAD", Icon = "ban" })
-        weaponTab:Toggle({
-                Title = "No Reload",
-                Desc = "Bron nie traci amunicji, klawisz reload zablokowany",
-                Value = Config.NoReload.Enabled, Flag = "noreload_enabled",
-                Callback = function(v)
-                        Config.NoReload.Enabled = v
-                        if v then
-                                notify("No Reload", HHState.reloadBlocked and "ON - reload zablokowany, amunicja odnawiana" or "ON - blokada Reload niedostepna (czekam na bron)", "ban", 4)
-                        end
-                end,
-        })
+        weaponTab:Section({ Title = "NO RELOAD (v3)", Icon = "rotate-cw" })
+        weaponTab:Toggle({ Title = "Włącz No Reload", Value = Config.NoReload.Enabled, Flag = "noreload_enabled",
+                Callback = function(v) Config.NoReload.Enabled = v end })
+        weaponTab:Dropdown({ Title = "Tryb", Values = { "Off", "Auto Reload", "Full (Top-Up)" }, Value = Config.NoReload.Mode,
+                Flag = "noreload_mode", Callback = function(v) if v then Config.NoReload.Mode = v end end })
+        weaponTab:Toggle({ Title = "Strzał przerywa reload", Desc = "Nigdy nie czekasz na animację przeładowania",
+                Value = Config.NoReload.UnblockShots, Flag = "noreload_unblock",
+                Callback = function(v) Config.NoReload.UnblockShots = v end })
+        weaponTab:Slider({ Title = "Skip Time (s)", Value = { Min = 0.05, Max = 2, Default = Config.NoReload.SkipTime },
+                Step = 0.05, Flag = "noreload_skip", Callback = function(v) Config.NoReload.SkipTime = v end })
+        weaponTab:Slider({ Title = "Top-Up przy %", Value = { Min = 0, Max = 100, Default = Config.NoReload.TopUpAt },
+                Step = 5, Flag = "noreload_topup", Callback = function(v) Config.NoReload.TopUpAt = v end })
+        weaponTab:Slider({ Title = "Cooldown Top-Up (s)", Value = { Min = 0.3, Max = 5, Default = Config.NoReload.Cooldown },
+                Step = 0.1, Flag = "noreload_cooldown", Callback = function(v) Config.NoReload.Cooldown = v end })
         weaponTab:Paragraph({
-                Title = "Jak to działa",
-                Desc = "Hook TryFire przywraca amunicję zużytą przez strzał, funkcja Reload jest neutralizowana, a nauczane pola amunicji są przypięte do pełnego magazynka. Jeśli po strzale i tak widzisz przeładowanie - wyślij mi dekompilat WeaponClient, przypnę dokładnie pole.",
+                Title = "Tryby",
+                Desc = "Auto Reload = reload startuje od razu i jest dokańczany po Skip Time (emulacja FastReload). Full (Top-Up) = dodatkowo sam doładowuje magazynek, gdy spadnie poniżej progu. Strzał przerywa reload = nigdy nie czekasz na animację.",
+        })
+
+        weaponTab:Section({ Title = "NOSPREAD (recoil / shake / kick)", Icon = "focus" })
+        weaponTab:Toggle({ Title = "Włącz NoSpread", Value = Config.NoSpread.Enabled, Flag = "nospread_enabled",
+                Callback = function(v) Config.NoSpread.Enabled = v end })
+        weaponTab:Toggle({ Title = "No Recoil (kamera nie ucieka)", Value = Config.NoSpread.Recoil, Flag = "nospread_recoil",
+                Callback = function(v) Config.NoSpread.Recoil = v end })
+        weaponTab:Toggle({ Title = "No Shake (bez trzęsienia)", Value = Config.NoSpread.Shake, Flag = "nospread_shake",
+                Callback = function(v) Config.NoSpread.Shake = v end })
+        weaponTab:Toggle({ Title = "No Kick (broń nie podskakuje)", Value = Config.NoSpread.Kick, Flag = "nospread_kick",
+                Callback = function(v) Config.NoSpread.Kick = v end })
+        weaponTab:Paragraph({
+                Title = "Jak działa",
+                Desc = "Pocisk w grze leci DOKŁADNIE po LookVector - losowego spreadu NIE ma. To co rozjeżdża strzały przy AutoShoot to recoil kamery, shake ekranu i kick broni. Każdy komponent możesz wyłączyć osobno.",
+        })
+
+        weaponTab:Section({ Title = "AUTOSHOOT (auto TryFire)", Icon = "target" })
+        weaponTab:Toggle({ Title = "Włącz AutoShoot", Value = Config.AutoShoot.Enabled, Flag = "autoshoot_enabled",
+                Callback = function(v) Config.AutoShoot.Enabled = v end })
+        weaponTab:Dropdown({ Title = "Klawisz", Values = { "Always", "RMB", "LMB", "Shift", "E", "Q" }, Value = Config.AutoShoot.Key,
+                Flag = "autoshoot_key", Callback = function(v) if v then Config.AutoShoot.Key = v end end })
+        weaponTab:Dropdown({ Title = "Hitbox", Values = HitboxOptions, Value = Config.AutoShoot.Hitbox,
+                Flag = "autoshoot_hitbox", Callback = function(v) if v then Config.AutoShoot.Hitbox = v end end })
+        weaponTab:Slider({ Title = "FOV", Value = { Min = 10, Max = 500, Default = Config.AutoShoot.Fov }, Step = 5,
+                Flag = "autoshoot_fov", Callback = function(v) Config.AutoShoot.Fov = v end })
+        weaponTab:Slider({ Title = "Delay (ms)", Desc = "0 = FireRate broni z Config gry",
+                Value = { Min = 0, Max = 1000, Default = Config.AutoShoot.Delay },
+                Step = 10, Flag = "autoshoot_delay", Callback = function(v) Config.AutoShoot.Delay = v end })
+        weaponTab:Slider({ Title = "Max dystans (m)", Value = { Min = 0, Max = 1000, Default = Config.AutoShoot.MaxDist },
+                Step = 10, Flag = "autoshoot_maxdist", Callback = function(v) Config.AutoShoot.MaxDist = v end })
+        weaponTab:Paragraph({
+                Title = "Uwaga",
+                Desc = "Viewmodel cache'uje się z hooka TryFire - po spawnie/zmianie broni strzel raz ręcznie. Pamiętaj, że serwer odrzuca strzały poza MaxRange broni.",
+        })
+
+        ---------------- ANTI-AIM ----------------
+        local aaTab = Window:Tab({ Title = "Anti-Aim", Icon = "tornado" })
+        aaTab:Section({ Title = "SPINBOT (obrót postaci)", Icon = "tornado" })
+        aaTab:Toggle({ Title = "Włącz Spinbot", Value = Config.Spinbot.Enabled, Flag = "spinbot_enabled",
+                Callback = function(v) Config.Spinbot.Enabled = v end })
+        aaTab:Slider({ Title = "Speed (obr/s)", Value = { Min = 1, Max = 30, Default = Config.Spinbot.Speed },
+                Step = 1, Flag = "spinbot_speed", Callback = function(v) Config.Spinbot.Speed = v end })
+        aaTab:Toggle({ Title = "Pitch góra/dół (anti-aim)", Value = Config.Spinbot.Pitch, Flag = "spinbot_pitch",
+                Callback = function(v) Config.Spinbot.Pitch = v end })
+        aaTab:Dropdown({ Title = "Tryb pitch", Values = { "Up/Down", "Sinus" }, Value = Config.Spinbot.PitchMode,
+                Flag = "spinbot_pitchmode", Callback = function(v) if v then Config.Spinbot.PitchMode = v end end })
+        aaTab:Slider({ Title = "Kąt pitch (°)", Value = { Min = 10, Max = 89, Default = Config.Spinbot.PitchAngle },
+                Step = 1, Flag = "spinbot_pitchangle", Callback = function(v) Config.Spinbot.PitchAngle = v end })
+        aaTab:Slider({ Title = "Tempo pitch", Value = { Min = 0.5, Max = 10, Default = Config.Spinbot.PitchSpeed },
+                Step = 0.5, Flag = "spinbot_pitchspeed", Callback = function(v) Config.Spinbot.PitchSpeed = v end })
+        aaTab:Paragraph({
+                Title = "Jak działa",
+                Desc = "Kręci HumanoidRootPart w miejscu - obrót replikuje się na serwer (klient jest ownerem fizyki). Pitch = głowa raz wysoko, raz nisko, więc headshot robi się bardzo trudny. AutoRotate wraca po wyłączeniu/unload.",
+        })
+
+        aaTab:Section({ Title = "AIMBUG (test animacji)", Icon = "activity" })
+        aaTab:Toggle({ Title = "Włącz AimBug", Value = Config.AimBug.Enabled, Flag = "aimbug_enabled",
+                Callback = function(v) Config.AimBug.Enabled = v end })
+        aaTab:Slider({ Title = "Interval (ms)", Value = { Min = 20, Max = 1000, Default = Config.AimBug.Interval },
+                Step = 10, Flag = "aimbug_interval", Callback = function(v) Config.AimBug.Interval = v end })
+        aaTab:Paragraph({
+                Title = "Info",
+                Desc = "Pętla spamuje AimState:FireServer(true/false) naprzemiennie. Przy strzale AimState = true natychmiast i jest trzymane, aż Fire przejdzie. Status: debug overlay (HOLD = strzał w toku).",
+        })
+
+        aaTab:Section({ Title = "BUGROLL (remote Roll)", Icon = "refresh-ccw" })
+        aaTab:Toggle({ Title = "Włącz BugRoll", Value = Config.BugRoll.Enabled, Flag = "bugroll_enabled",
+                Callback = function(v) Config.BugRoll.Enabled = v end })
+        aaTab:Dropdown({ Title = "Tryb", Values = { "Ciągły", "Start+End" }, Value = Config.BugRoll.Mode,
+                Flag = "bugroll_mode", Callback = function(v) if v then Config.BugRoll.Mode = v end end })
+        aaTab:Slider({ Title = "Interval (ms)", Value = { Min = 20, Max = 1000, Default = Config.BugRoll.Interval },
+                Step = 10, Flag = "bugroll_interval", Callback = function(v) Config.BugRoll.Interval = v end })
+        aaTab:Slider({ Title = "Pauza po End (ms)", Value = { Min = 20, Max = 1000, Default = Config.BugRoll.Pause },
+                Step = 10, Flag = "bugroll_pause", Callback = function(v) Config.BugRoll.Pause = v end })
+        aaTab:Dropdown({ Title = "Pakiet końca", Values = { "End", "Cancel" }, Value = Config.BugRoll.EndPacket,
+                Flag = "bugroll_endpacket", Callback = function(v) if v then Config.BugRoll.EndPacket = v end end })
+        aaTab:Paragraph({
+                Title = "Jak działa",
+                Desc = "Tryb Ciągły = Roll:FireServer(\"Start\", dir) co Interval ms - serwer cały czas widzi rozpoczynanie rolla. Tryb Start+End = Start, po Interval koniec (End/Cancel), po Pause kolejny cykl. Kierunek = kierunek kamery.",
         })
 
         ---------------- VISUALS ----------------
@@ -17996,16 +18537,34 @@ local function unload()
                 end)
                 pSilentHooked = false
         end
-        if HHState.WC then
-                pcall(function()
-                        if HHState.origTryFire then
-                                HHState.WC.TryFire = HHState.origTryFire
+        -- przywróć WSZYSTKIE podmienione funkcje modułów (TryFire/Reload/
+        -- CancelReload/AddRecoil/Shake/Kick) - po v3
+        for mod, origs in pairs(hookedOriginals) do
+                if typeof(mod) == "table" and type(origs) == "table" then
+                        for name, orig in pairs(origs) do
+                                if orig then
+                                        pcall(function()
+                                                mod[name] = orig
+                                        end)
+                                end
                         end
-                        if HHState.origReload then
-                                HHState.WC.Reload = HHState.origReload
-                        end
-                end)
+                end
         end
+        table.clear(hookedOriginals)
+        -- przywróć postać po Spinbocie (AutoRotate + prosto bez pitch)
+        pcall(function()
+                local h = LP.Character and LP.Character:FindFirstChildOfClass("Humanoid")
+                if h then
+                        h.AutoRotate = true
+                end
+        end)
+        pcall(function()
+                local hrpU = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+                if hrpU then
+                        local _, yy, _ = hrpU.CFrame:ToEulerAnglesYXZ()
+                        hrpU.CFrame = CFrame.new(hrpU.Position) * CFrame.Angles(0, yy, 0)
+                end
+        end)
         for plr in pairs(ESPObjects) do
                 removeESP(plr)
         end
@@ -18035,9 +18594,8 @@ shared.HoundsHook = API
 
 task.defer(function()
         if WindUI then
-                notify("HoundsHook v5.2 GOLD", "Menu: RIGHT SHIFT / INSERT  •  Arrows + Kapelusz RGB w Visuals", "skull", 7)
+                notify("HoundsHook v6.0 MERGE", "Menu: RIGHT SHIFT / INSERT  •  pSilent v18 + No-Reload v3 + Anty-Aim  •  visualsy v5.2", "skull", 7)
         else
-                warn("[HoundsHook] v5.2 dziala w trybie awaryjnym (bez WindUI). Menu: INSERT / RIGHT SHIFT")
+                warn("[HoundsHook] v6.0 dziala w trybie awaryjnym (bez WindUI). Menu: INSERT / RIGHT SHIFT")
         end
 end)
-
