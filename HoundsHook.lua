@@ -4,7 +4,7 @@
         ================================================================
           Uruchamianie (loadstring - patrz HoundsHook_loader.lua):
 
-            loadstring(game:HttpGet("TWOJ_URL/HoundsHook.lua"))()
+            loadstring(game:HttpGet("Babel75/HoundsHook.lua"))()
 
           Co nowego w v5.2:
            - OFF-SCREEN ARROWS - strzalki na krawedzi ekranu wskazuja
