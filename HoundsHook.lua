@@ -1,10 +1,21 @@
 --[[
         ================================================================
-          HOUNDSHOOK v5.1 "GOLD"  -  menu WindUI (wbudowane w plik)
+          HOUNDSHOOK v5.2 "GOLD"  -  menu WindUI (wbudowane w plik)
         ================================================================
           Uruchamianie (loadstring - patrz HoundsHook_loader.lua):
 
             loadstring(game:HttpGet("TWOJ_URL/HoundsHook.lua"))()
+
+          Co nowego w v5.2:
+           - OFF-SCREEN ARROWS - strzalki na krawedzi ekranu wskazuja
+             kierunek do graczy poza ekranem (dystans, kolor, margines,
+             team check - wsm wszystko konfigurowalne w Visuals)
+           - CHINSKI KAPELUSZ (doli) na twojej glowie - 100% client-side,
+             inni gracze go NIE WIDZA; konos 10-segmentowy z ranta
+             i supelkiem jak na zdjeciu
+           - RGB fade na kapeluszu - tetowa fala kolorow biegnaca
+             po segmentach konca (Neon / SmoothPlastic do wyboru)
+           - Watermark przeniesiony na PRAWY GORNY rog
 
           Co nowego w v5.1 (HOTFIX pSilent):
            - FIX: crash 'insert (table expected, got nil)' w hooku
@@ -33,7 +44,7 @@
         ================================================================
 ]]
 
-local HH_VERSION = "5.1.0"
+local HH_VERSION = "5.2.0"
 
 ------------------------------------------------------------------
 -- [0] SPRZATANIE PO POPRZEDNIEJ INSTANCJI (hot-reload / zmiana wersji)
@@ -91,6 +102,13 @@ do
                 if old then
                         old:Destroy()
                 end
+        end
+end
+-- sprzatanie kapelusza po poprzedniej instancji (hot-reload / zmiana wersji)
+do
+        local oldHat = Workspace:FindFirstChild("HH_ChineseHat")
+        if oldHat then
+                oldHat:Destroy()
         end
 end
 
@@ -15790,6 +15808,22 @@ local Config = {
                 ColorInvisible = Color3.fromRGB(255, 80, 80),
                 ColorFriend = Color3.fromRGB(90, 170, 255),
         },
+        Arrows = {
+                Enabled = true,
+                ShowDistance = true,
+                MaxDistance = 1000,
+                Margin = 46, -- px od krawedzi ekranu
+                Color = Color3.fromRGB(212, 175, 55),
+        },
+        Hat = {
+                Enabled = false,
+                RGB = true, -- fade tetowy jak na zdjeciu (client-side)
+                Neon = true, -- swiecenie (gdy RGB) / SmoothPlastic
+                Speed = 0.25, -- pelny cykl HSV na sekunde
+                Scale = 100, -- % rozmiaru
+                Straw = Color3.fromRGB(198, 160, 92), -- sloma (gdy RGB off)
+                Rim = Color3.fromRGB(168, 205, 82), -- zielony rant jak na zdjeciu
+        },
         Aimbot = {
                 Enabled = false,
                 Key = "RMB",
@@ -16834,7 +16868,8 @@ local DebugLabel = new("TextLabel", {
 }, ESPGui)
 
 local Watermark = new("TextLabel", {
-        Position = UDim2.fromOffset(12, 10),
+        AnchorPoint = Vector2.new(1, 0),
+        Position = UDim2.new(1, -12, 0, 10), -- PRAWY GORNY rog
         Size = UDim2.fromOffset(420, 18),
         BackgroundTransparency = 1,
         Font = Enum.Font.GothamBold,
@@ -16842,10 +16877,259 @@ local Watermark = new("TextLabel", {
         RichText = true,
         TextColor3 = Color3.fromRGB(212, 175, 55),
         TextStrokeTransparency = 0.4,
-        TextXAlignment = Enum.TextXAlignment.Left,
+        TextXAlignment = Enum.TextXAlignment.Right,
         Text = "",
         Visible = true,
 }, ESPGui)
+
+------------------------------------------------------------------
+-- [11a] OFF-SCREEN ARROWS - strzalki na krawedzi ekranu
+------------------------------------------------------------------
+local ArrowObjects = {}
+
+local function getArrow(plr)
+        local a = ArrowObjects[plr]
+        if not a then
+                a = {}
+                a.Root = new("Frame", {
+                        BackgroundTransparency = 1,
+                        Size = UDim2.fromOffset(1, 1),
+                        Visible = false,
+                }, ESPGui)
+                -- czewron ">" z dwoch belek (bez zaleznosci od fontow)
+                a.B1 = new("Frame", {
+                        AnchorPoint = Vector2.new(0.5, 0.5),
+                        Position = UDim2.fromOffset(0, -2),
+                        Size = UDim2.fromOffset(9, 3),
+                        Rotation = 26.6,
+                        BackgroundColor3 = Config.Arrows.Color,
+                        BorderSizePixel = 0,
+                }, a.Root)
+                a.B2 = new("Frame", {
+                        AnchorPoint = Vector2.new(0.5, 0.5),
+                        Position = UDim2.fromOffset(0, 2),
+                        Size = UDim2.fromOffset(9, 3),
+                        Rotation = -26.6,
+                        BackgroundColor3 = Config.Arrows.Color,
+                        BorderSizePixel = 0,
+                }, a.Root)
+                corner(a.B1, 1.5)
+                corner(a.B2, 1.5)
+                a.Dist = new("TextLabel", {
+                        AnchorPoint = Vector2.new(0.5, 0),
+                        Position = UDim2.fromOffset(0, 7),
+                        Size = UDim2.fromOffset(60, 12),
+                        BackgroundTransparency = 1,
+                        Font = Enum.Font.GothamMedium,
+                        TextSize = 11,
+                        TextColor3 = Config.Arrows.Color,
+                        TextStrokeTransparency = 0.5,
+                        Text = "",
+                }, a.Root)
+                ArrowObjects[plr] = a
+        end
+        return a
+end
+
+local function updateArrows()
+        local cfg = Config.Arrows
+        local vp = Camera.ViewportSize
+        local center = Vector2.new(vp.X / 2, vp.Y / 2)
+        local camPos = Camera.CFrame.Position
+        local alive = {}
+
+        for _, plr in ipairs(Players:GetPlayers()) do
+                if plr ~= LP then
+                        alive[plr] = true
+                        local a = getArrow(plr)
+                        local show = false
+
+                        if cfg.Enabled then
+                                local ok, ch, hum, root = isValid(plr) -- team check w srodku
+                                if ok and not isFriend(plr) then
+                                        local dist = (root.Position - camPos).Magnitude
+                                        if dist <= cfg.MaxDistance then
+                                                local sp = Camera:WorldToViewportPoint(root.Position)
+                                                local pos2 = Vector2.new(sp.X, sp.Y)
+                                                local behind = sp.Z <= 0
+                                                local dir = pos2 - center
+                                                if behind then
+                                                        dir = -dir
+                                                end
+                                                local off = behind
+                                                        or pos2.X < 24
+                                                        or pos2.X > vp.X - 24
+                                                        or pos2.Y < 24
+                                                        or pos2.Y > vp.Y - 24
+                                                if off and dir.Magnitude > 1e-3 then
+                                                        local d = dir.Unit
+                                                        local m = cfg.Margin
+                                                        local tx = (vp.X / 2 - m) / math.max(math.abs(d.X), 1e-6)
+                                                        local ty = (vp.Y / 2 - m) / math.max(math.abs(d.Y), 1e-6)
+                                                        local edge = center + d * math.min(tx, ty)
+                                                        a.Root.Position = UDim2.fromOffset(edge.X, edge.Y)
+                                                        a.Root.Rotation = math.deg(math.atan2(d.Y, d.X))
+                                                        a.Dist.Rotation = -a.Root.Rotation -- tekst zawsze poziomo
+                                                        a.Dist.Text = string.format("%.0fm", dist)
+                                                        a.Dist.Visible = cfg.ShowDistance
+                                                        show = true
+                                                end
+                                        end
+                                end
+                        end
+
+                        a.Root.Visible = show
+                        if show then
+                                a.B1.BackgroundColor3 = cfg.Color
+                                a.B2.BackgroundColor3 = cfg.Color
+                                a.Dist.TextColor3 = cfg.Color
+                        end
+                end
+        end
+
+        -- sprzatanie po wyjscu graczy z serwera
+        for plr, a in pairs(ArrowObjects) do
+                if not alive[plr] then
+                        a.Root:Destroy()
+                        ArrowObjects[plr] = nil
+                end
+        end
+end
+
+------------------------------------------------------------------
+-- [11b] CHINSKI KAPELUSZ (doli) - 100% client-side + RGB fade
+--       Konos z 10 segmentow (20 klinikow) + rant + supelek,
+--       jak na zdjeciu; inni gracze go NIE WIDZA (render lokalny).
+------------------------------------------------------------------
+local HatModel, HatEntries, HatBuiltScale
+local HAT_SEGMENTS = 10
+
+local function destroyHat()
+        if HatModel then
+                pcall(function()
+                        HatModel:Destroy()
+                end)
+        end
+        HatModel, HatEntries, HatBuiltScale = nil, nil, nil
+end
+HHState.destroyHat = destroyHat -- dla Unload (czesc [19])
+
+local function hatProps(shape, size, cf)
+        return {
+                Shape = shape,
+                Size = size,
+                CFrame = cf,
+                Anchored = true,
+                CanCollide = false,
+                CanQuery = false, -- nasze raycasty (aimbot/pSilent) go ignoruja
+                CanTouch = false,
+                CastShadow = false,
+        }
+end
+
+local function buildHat(scale)
+        destroyHat()
+        local R = 1.55 * scale -- promien klosza
+        local H = 0.85 * scale -- wysokosc czubka
+        local t = 0.05 -- grubosc scianki
+
+        HatModel = new("Model", { Name = "HH_ChineseHat" })
+        HatEntries = {}
+
+        local apex = Vector3.new(0, H, 0)
+        for k = 0, HAT_SEGMENTS - 1 do
+                local a1 = (k / HAT_SEGMENTS) * math.pi * 2
+                local a2 = ((k + 1) / HAT_SEGMENTS) * math.pi * 2
+                local B1 = Vector3.new(R * math.cos(a1), 0, R * math.sin(a1))
+                local B2 = Vector3.new(R * math.cos(a2), 0, R * math.sin(a2))
+                local M = (B1 + B2) / 2
+                -- kazdy segment = 2 klinki (trojkat prostokatny A-M-B)
+                for _, B in ipairs({ B1, B2 }) do
+                        local u2 = (apex - M).Unit -- M -> czubek (noga "pionowa")
+                        local u1 = (B - M).Unit -- M -> naroznik podstawy (noga "pozioma")
+                        local vX = u2:Cross(u1).Unit -- normalny sciany (grubosc)
+                        local halfY = (apex - M).Magnitude / 2
+                        local halfZ = (B - M).Magnitude / 2
+                        local center = M + u2 * halfY + u1 * halfZ
+                        local cf = CFrame.fromMatrix(center, vX, u2, u1)
+                        local p = new("WedgePart", hatProps(nil, Vector3.new(t, halfY * 2, halfZ * 2), cf), HatModel)
+                        table.insert(HatEntries, { part = p, cf = cf, seg = k })
+                end
+        end
+
+        -- rant (z Zielona obrecza jak na zdjeciu) i supelek na czubku
+        local rimCF = CFrame.new(0, 0.02, 0) * CFrame.Angles(0, 0, math.rad(90))
+        local rim = new("Part", hatProps(Enum.PartType.Cylinder,
+                Vector3.new(0.07, (R + 0.1) * 2, (R + 0.1) * 2), rimCF), HatModel)
+        local knotCF = CFrame.new(0, H + 0.09 * scale, 0)
+        local knot = new("Part", hatProps(Enum.PartType.Ball,
+                Vector3.new(0.18, 0.18, 0.18) * scale, knotCF), HatModel)
+
+        HatEntries.rim = rim
+        HatEntries.rimCF = rimCF
+        HatEntries.knot = knot
+        HatEntries.knotCF = knotCF
+        HatBuiltScale = scale
+        HatModel.Parent = Workspace -- TYLKO lokalnie - nigdy nie leci na serwer
+end
+
+local function updateHat()
+        local cfg = Config.Hat
+        if not cfg.Enabled then
+                if HatModel then
+                        destroyHat()
+                end
+                return
+        end
+
+        local scale = cfg.Scale / 100
+        if not HatModel or HatBuiltScale ~= scale then
+                buildHat(scale)
+        end
+
+        local char = LP.Character
+        local head = char and (char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart"))
+        if not head then
+                -- respawn / brak postaci: ukryj, ale nie buduj od nowa
+                if HatModel.Parent then
+                        HatModel.Parent = nil
+                end
+                return
+        end
+        if not HatModel.Parent then
+                HatModel.Parent = Workspace
+        end
+
+        -- baza kapelusza = czubek glowy (kapelusz przechyla sie z glowa)
+        local base = head.CFrame * CFrame.new(0, head.Size.Y / 2 + 0.06, 0)
+        local rgbOn = cfg.RGB
+        local mat = (rgbOn and cfg.Neon) and Enum.Material.Neon or Enum.Material.SmoothPlastic
+        local hue = (os.clock() * cfg.Speed) % 1
+
+        for _, e in ipairs(HatEntries) do
+                e.part.CFrame = base * e.cf
+                e.part.Material = mat
+                if rgbOn then
+                        -- faza przesunieta per segment -> tetowa fala biegnaca po konosie
+                        e.part.Color = Color3.fromHSV((hue + (e.seg / HAT_SEGMENTS) * 0.25) % 1, 0.72, 1)
+                else
+                        local s = cfg.Straw
+                        if e.seg % 2 == 0 then
+                                e.part.Color = s
+                        else
+                                e.part.Color = Color3.new(s.R * 0.88, s.G * 0.88, s.B * 0.88) -- plot wiklinowy
+                        end
+                end
+        end
+
+        HatEntries.rim.CFrame = base * HatEntries.rimCF
+        HatEntries.rim.Material = mat
+        HatEntries.rim.Color = rgbOn and Color3.fromHSV(hue, 0.9, 1) or cfg.Rim
+
+        HatEntries.knot.CFrame = base * HatEntries.knotCF
+        HatEntries.knot.Material = mat
+        HatEntries.knot.Color = rgbOn and Color3.fromHSV(hue, 0.85, 1) or cfg.Straw
+end
 
 ------------------------------------------------------------------
 -- [12] SLEDZENIE WEJSCIA
@@ -16988,6 +17272,12 @@ bind(RunService.RenderStepped, function(dt)
                 end
         end
         FlashDot.Visible = flashing
+
+        -- Off-screen arrows (kierunek do graczy poza ekranem)
+        updateArrows()
+
+        -- Chinski kapelusz (client-side render + RGB fade)
+        updateHat()
 
         -- Watermark
         Watermark.Visible = Config.Menu.Watermark
@@ -17343,6 +17633,38 @@ local function buildWindUIMenu()
                 Desc = "Przyjaciel > widoczny > niewidoczny. Status widoczności liczy raycastem (RespectCanCollide).",
         })
 
+        visTab:Section({ Title = "OFF-SCREEN ARROWS", Icon = "navigation" })
+        visTab:Toggle({ Title = "Strzałki off-screen", Value = Config.Arrows.Enabled, Flag = "arrows_enabled",
+                Callback = function(v) Config.Arrows.Enabled = v end })
+        visTab:Toggle({ Title = "Dystans pod strzałką", Value = Config.Arrows.ShowDistance, Flag = "arrows_dist",
+                Callback = function(v) Config.Arrows.ShowDistance = v end })
+        visTab:Slider({ Title = "Maks. dystans strzałek", Value = { Min = 200, Max = 2000, Default = Config.Arrows.MaxDistance },
+                Step = 50, Flag = "arrows_maxdist", Callback = function(v) Config.Arrows.MaxDistance = v end })
+        visTab:Slider({ Title = "Margines od krawędzi", Value = { Min = 20, Max = 120, Default = Config.Arrows.Margin },
+                Step = 2, Flag = "arrows_margin", Callback = function(v) Config.Arrows.Margin = v end })
+        visTab:Colorpicker({ Title = "Kolor strzałek", Value = Config.Arrows.Color, Flag = "arrows_color",
+                Callback = function(c) Config.Arrows.Color = c end })
+
+        visTab:Section({ Title = "CHIŃSKI KAPELUSZ (client-side)", Icon = "triangle" })
+        visTab:Paragraph({
+                Title = "Render 100% lokalny",
+                Desc = "Kapelusz widzisz TYLKO TY - nie leci na serwer, inni gracze go nie widzą. RGB fade = tęczowa fala biegnąca po kloszu.",
+        })
+        visTab:Toggle({ Title = "Załóż kapelusz", Value = Config.Hat.Enabled, Flag = "hat_enabled",
+                Callback = function(v) Config.Hat.Enabled = v end })
+        visTab:Toggle({ Title = "RGB fade", Value = Config.Hat.RGB, Flag = "hat_rgb",
+                Callback = function(v) Config.Hat.RGB = v end })
+        visTab:Toggle({ Title = "Neon (świecenie)", Value = Config.Hat.Neon, Flag = "hat_neon",
+                Callback = function(v) Config.Hat.Neon = v end })
+        visTab:Slider({ Title = "Prędkość RGB", Value = { Min = 5, Max = 100, Default = Config.Hat.Speed * 100 },
+                Step = 5, Flag = "hat_speed", Callback = function(v) Config.Hat.Speed = v / 100 end })
+        visTab:Slider({ Title = "Rozmiar kapelusza", Value = { Min = 50, Max = 200, Default = Config.Hat.Scale },
+                Step = 5, Flag = "hat_scale", Callback = function(v) Config.Hat.Scale = v end })
+        visTab:Colorpicker({ Title = "Słoma (gdy RGB off)", Value = Config.Hat.Straw, Flag = "hat_straw",
+                Callback = function(c) Config.Hat.Straw = c end })
+        visTab:Colorpicker({ Title = "Zielony rant (gdy RGB off)", Value = Config.Hat.Rim, Flag = "hat_rim",
+                Callback = function(c) Config.Hat.Rim = c end })
+
         ---------------- GRACZE / PRZYJACIELE ----------------
         local frTab = Window:Tab({ Title = "Gracze", Icon = "users" })
         frTab:Section({ Title = "PRZYJACIELE", Icon = "user-plus" })
@@ -17687,6 +18009,11 @@ local function unload()
         for plr in pairs(ESPObjects) do
                 removeESP(plr)
         end
+        pcall(function()
+                if HHState.destroyHat then
+                        HHState.destroyHat()
+                end
+        end)
         ESPGui:Destroy()
         if MenuRoot then
                 MenuRoot:Destroy()
@@ -17708,8 +18035,8 @@ shared.HoundsHook = API
 
 task.defer(function()
         if WindUI then
-                notify("HoundsHook v5.1 GOLD", "Menu: RIGHT SHIFT / INSERT  •  WindUI 1.6.65 wbudowane w plik", "skull", 7)
+                notify("HoundsHook v5.2 GOLD", "Menu: RIGHT SHIFT / INSERT  •  Arrows + Kapelusz RGB w Visuals", "skull", 7)
         else
-                warn("[HoundsHook] v5.1 dziala w trybie awaryjnym (bez WindUI). Menu: INSERT / RIGHT SHIFT")
+                warn("[HoundsHook] v5.2 dziala w trybie awaryjnym (bez WindUI). Menu: INSERT / RIGHT SHIFT")
         end
 end)
